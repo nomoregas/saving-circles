@@ -210,14 +210,6 @@ contract ConditionalGrantsUnit is Test {
     grants.create(_t, coop);
   }
 
-  function test_create_revertsZeroPeriod() public {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
-    _t.payBackPeriod = 0;
-    vm.prank(bread);
-    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
-    grants.create(_t, coop);
-  }
-
   function test_create_revertsPeriodAboveMax() public {
     IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
     _t.payBackPeriod = grants.MAX_PAY_BACK_PERIOD() + 1;
@@ -601,6 +593,101 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(stranger);
     vm.expectRevert(IConditionalGrants.NotGrantor.selector);
     grants.extendPayBackBy(_id, _payBackBy + 1);
+  }
+
+  // --------------------------------------------------------------------------
+  // Open-ended (no deadline)
+  // --------------------------------------------------------------------------
+
+  function _createOpenEnded() internal returns (uint256 _id) {
+    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    _t.payBackPeriod = 0;
+    vm.prank(bread);
+    _id = grants.create(_t, coop);
+    vm.prank(coop);
+    grants.accept(_id, TERMS);
+  }
+
+  function test_openEnded_neverOverdueAndNotReclaimable() public {
+    uint256 _id = _createOpenEnded();
+    assertEq(_status(_id).payBackBy, 0);
+    assertEq(grants.reclaimableAt(_id), 0);
+
+    vm.warp(block.timestamp + grants.MAX_PAY_BACK_PERIOD() * 2);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Active));
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.reclaimGrant(_id);
+
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    grants.releaseGrant(_id);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    assertEq(usdt.balanceOf(coop), START_BAL + GRANT);
+  }
+
+  function test_openEnded_setPayBackByWithNotice() public {
+    uint256 _id = _createOpenEnded();
+    uint256 _notice = grants.DEADLINE_NOTICE_PERIOD();
+
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
+    grants.setPayBackBy(_id, block.timestamp + _notice - 1);
+
+    // extendPayBackBy cannot be used to skip the notice period.
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.extendPayBackBy(_id, block.timestamp + 1);
+
+    vm.prank(stranger);
+    vm.expectRevert(IConditionalGrants.NotGrantor.selector);
+    grants.setPayBackBy(_id, block.timestamp + _notice);
+
+    uint256 _payBackBy = block.timestamp + _notice;
+    vm.expectEmit(true, false, false, true);
+    emit IConditionalGrants.PayBackBySet(_id, _payBackBy);
+    vm.prank(bread);
+    grants.setPayBackBy(_id, _payBackBy);
+    assertEq(_status(_id).payBackBy, _payBackBy);
+    assertEq(grants.reclaimableAt(_id), _payBackBy + grants.RECLAIM_GRACE_PERIOD());
+
+    // Once set, it can only be extended, never set again.
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.setPayBackBy(_id, _payBackBy + 1);
+    vm.prank(bread);
+    grants.extendPayBackBy(_id, _payBackBy + 1 days);
+
+    vm.warp(_payBackBy + 1 days);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Overdue));
+    vm.warp(_payBackBy + 1 days + grants.RECLAIM_GRACE_PERIOD());
+    vm.prank(bread);
+    grants.reclaimGrant(_id);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
+    _assertSolvent();
+  }
+
+  function test_setPayBackBy_revertsOnFixedDeadlineOrWrongState() public {
+    uint256 _fixed = _createAccepted(address(0), GRANT);
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.setPayBackBy(_fixed, block.timestamp + 365 days);
+
+    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    _t.payBackPeriod = 0;
+    vm.prank(bread);
+    uint256 _offered = grants.create(_t, coop);
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.setPayBackBy(_offered, block.timestamp + 365 days);
+
+    vm.prank(coop);
+    grants.accept(_offered, TERMS);
+    vm.prank(coop);
+    grants.payBack(_offered, ADVANCE);
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.setPayBackBy(_offered, block.timestamp + 365 days);
   }
 
   function test_reclaimGrant_blockedDuringGrace() public {

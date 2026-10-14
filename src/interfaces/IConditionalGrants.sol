@@ -20,7 +20,8 @@ interface IConditionalGrants {
    * @dev Offered = 0 funded and waiting for the grantee to accept, before acceptBy.
    *      Expired = 1 not accepted by acceptBy; the grantor can cancel for a full refund.
    *      Cancelled = 2 the grantor withdrew the offer before acceptance. Terminal.
-   *      Active = 3 accepted, advance not fully paid back, before payBackBy.
+   *      Active = 3 accepted, advance not fully paid back, before payBackBy (or open-ended with no
+   *                deadline set yet).
    *      Overdue = 4 accepted, advance not fully paid back, at/after payBackBy. The grantee may still
    *                 pay back and claim the grant until the grantor reclaims it, which is only
    *                 allowed RECLAIM_GRACE_PERIOD after payBackBy.
@@ -51,8 +52,9 @@ interface IConditionalGrants {
    * @param grant The amount released to the grantee once the advance is paid back; 0 makes this a
    *        plain zero-interest advance with no grant.
    * @param acceptBy Unix timestamp; the grantee must accept strictly before it.
-   * @param payBackPeriod Seconds after acceptance until an unpaid advance becomes Overdue
-   *        (> 0, at most MAX_PAY_BACK_PERIOD).
+   * @param payBackPeriod Seconds after acceptance until an unpaid advance becomes Overdue, at most
+   *        MAX_PAY_BACK_PERIOD. 0 makes the grant open-ended: no deadline until the grantor sets one
+   *        with setPayBackBy(), at least DEADLINE_NOTICE_PERIOD in the future.
    * @param termsHash Hash of the off-chain agreement (e.g. an IPFS document) the grantee signs
    *        up to by passing the same hash to accept(). May be zero if no document is used.
    */
@@ -71,8 +73,8 @@ interface IConditionalGrants {
    * @param grantor The creator and funder of the conditional grant.
    * @param grantee The only address that can accept; may be set after create() if left empty.
    * @param acceptedAt Acceptance timestamp, 0 until accepted.
-   * @param payBackBy Timestamp at which an unpaid advance becomes Overdue, 0 until accepted. The
-   *        grantor may push it later with extendPayBackBy().
+   * @param payBackBy Timestamp at which an unpaid advance becomes Overdue, 0 until accepted or while
+   *        an open-ended grant has no deadline. The grantor may push it later with extendPayBackBy().
    * @param disbursed Tokens actually paid to the grantee on acceptance. Equals advance unless
    *        the vault lost value, in which case the grantee only owes what they received.
    * @param paidBack Cumulative advance paid back (never exceeds disbursed).
@@ -181,6 +183,13 @@ interface IConditionalGrants {
   event PayBackByExtended(uint256 indexed id, uint256 payBackBy);
 
   /**
+   * @notice Emitted when the grantor sets the first deadline on an open-ended grant.
+   * @param id The conditional grant id.
+   * @param payBackBy The deadline.
+   */
+  event PayBackBySet(uint256 indexed id, uint256 payBackBy);
+
+  /**
    * @notice Emitted when yield earned on escrow is credited to the grantor.
    * @param id The conditional grant id.
    * @param amount Tokens credited.
@@ -211,8 +220,9 @@ interface IConditionalGrants {
   /// @notice Thrown when acceptBy is not in the future
   error InvalidAcceptBy();
 
-  /// @notice Thrown when the pay-back period is zero or above MAX_PAY_BACK_PERIOD, or an extension does
-  ///         not move payBackBy later and into the future
+  /// @notice Thrown when the pay-back period is above MAX_PAY_BACK_PERIOD, an extension does not move
+  ///         payBackBy later and into the future, or a deadline set on an open-ended grant gives less
+  ///         than DEADLINE_NOTICE_PERIOD notice
   error InvalidPayBackPeriod();
 
   /// @notice Thrown when the grantor reclaims the grant before reclaimableAt()
@@ -306,11 +316,20 @@ interface IConditionalGrants {
   function reclaimGrant(uint256 id) external;
 
   /**
-   * @notice Move the pay-back deadline later, e.g. to give the grantee more time.
+   * @notice Move the pay-back deadline later, e.g. to give the grantee more time. Reverts on an
+   *         open-ended grant with no deadline yet; use setPayBackBy() instead.
    * @param id The conditional grant id.
    * @param newPayBackBy The new deadline; must be later than the current one and in the future.
    */
   function extendPayBackBy(uint256 id, uint256 newPayBackBy) external;
+
+  /**
+   * @notice Set the first deadline on an open-ended grant (payBackPeriod 0). The grantee gets at least
+   *         DEADLINE_NOTICE_PERIOD of notice; after that it behaves like any other deadline.
+   * @param id The conditional grant id.
+   * @param payBackBy The deadline; at least DEADLINE_NOTICE_PERIOD from now.
+   */
+  function setPayBackBy(uint256 id, uint256 payBackBy) external;
 
   /**
    * @notice Pay the grantor all credited payments and yield. Callable by anyone.
@@ -366,6 +385,12 @@ interface IConditionalGrants {
    * @return period The period in seconds.
    */
   function MAX_PAY_BACK_PERIOD() external view returns (uint256 period);
+
+  /**
+   * @notice The minimum notice the grantor must give when setting a deadline on an open-ended grant.
+   * @return period The period in seconds.
+   */
+  function DEADLINE_NOTICE_PERIOD() external view returns (uint256 period);
 
   /**
    * @notice When the grantor may reclaim the grant, or 0 if it cannot be reclaimed (no grant, not

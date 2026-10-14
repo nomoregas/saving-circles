@@ -31,6 +31,9 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   uint256 public constant override MAX_PAY_BACK_PERIOD = 3650 days;
 
   /// @inheritdoc IConditionalGrants
+  uint256 public constant override DEADLINE_NOTICE_PERIOD = 30 days;
+
+  /// @inheritdoc IConditionalGrants
   uint256 public nextId;
 
   mapping(address token => bool status) internal _allowedTokens;
@@ -96,9 +99,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     ) revert InvalidVault();
     if (_grantTerms.advance == 0) revert InvalidAdvance();
     if (_grantTerms.acceptBy <= block.timestamp) revert InvalidAcceptBy();
-    if (_grantTerms.payBackPeriod == 0 || _grantTerms.payBackPeriod > MAX_PAY_BACK_PERIOD) {
-      revert InvalidPayBackPeriod();
-    }
+    if (_grantTerms.payBackPeriod > MAX_PAY_BACK_PERIOD) revert InvalidPayBackPeriod();
     if (_grantee == msg.sender) revert InvalidGrantee();
 
     _id = nextId++;
@@ -156,11 +157,23 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   function extendPayBackBy(uint256 _id, uint256 _newPayBackBy) external override onlyGrantor(_id) {
     GrantState _s = _state(_id);
     if (_s != GrantState.Active && _s != GrantState.Overdue) revert InvalidState();
+    // An open-ended grant gets its first deadline through setPayBackBy, which enforces the notice period.
+    if (_status[_id].payBackBy == 0) revert InvalidState();
     if (_newPayBackBy <= _status[_id].payBackBy || _newPayBackBy <= block.timestamp) revert InvalidPayBackPeriod();
 
     _status[_id].payBackBy = _newPayBackBy;
 
     emit PayBackByExtended(_id, _newPayBackBy);
+  }
+
+  /// @inheritdoc IConditionalGrants
+  function setPayBackBy(uint256 _id, uint256 _payBackBy) external override onlyGrantor(_id) {
+    if (_state(_id) != GrantState.Active || _status[_id].payBackBy != 0) revert InvalidState();
+    if (_payBackBy < block.timestamp + DEADLINE_NOTICE_PERIOD) revert InvalidPayBackPeriod();
+
+    _status[_id].payBackBy = _payBackBy;
+
+    emit PayBackBySet(_id, _payBackBy);
   }
 
   /// @inheritdoc IConditionalGrants
@@ -188,7 +201,8 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_termsHash != _t.termsHash) revert TermsMismatch();
 
     _st.acceptedAt = block.timestamp;
-    _st.payBackBy = block.timestamp + _t.payBackPeriod;
+    // A zero pay-back period means no deadline until the grantor sets one with setPayBackBy.
+    if (_t.payBackPeriod != 0) _st.payBackBy = block.timestamp + _t.payBackPeriod;
 
     uint256 _disbursed = _release(_id, _t.advance, msg.sender);
     _st.disbursed = _disbursed;
@@ -349,14 +363,17 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   }
 
   /// @dev Earliest reclaim time: a grace period after the deadline while unpaid, or a long wait
-  ///      after full pay-back if the grant was never released. 0 when there is nothing to reclaim.
+  ///      after full pay-back if the grant was never released. 0 when there is nothing to reclaim,
+  ///      including an open-ended grant with no deadline set.
   function _reclaimableAt(uint256 _id) internal view returns (uint256 _timestamp) {
     GrantStatus storage _st = _status[_id];
     if (_terms[_id].grant == 0 || _st.cancelled || _st.acceptedAt == 0 || _st.grantPaid || _st.grantReclaimed) {
       return 0;
     }
-    _timestamp =
-      _st.paidBack >= _st.disbursed ? _st.paidBackAt + STUCK_GRANT_PERIOD : _st.payBackBy + RECLAIM_GRACE_PERIOD;
+    if (_st.paidBack >= _st.disbursed) return _st.paidBackAt + STUCK_GRANT_PERIOD;
+    // Open-ended and no deadline set yet: nothing can be reclaimed.
+    if (_st.payBackBy == 0) return 0;
+    _timestamp = _st.payBackBy + RECLAIM_GRACE_PERIOD;
   }
 
   /**
@@ -373,6 +390,6 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_st.paidBack >= _st.disbursed) {
       return (_st.grantPaid || _terms[_id].grant == 0) ? GrantState.Completed : GrantState.PaidBack;
     }
-    return block.timestamp < _st.payBackBy ? GrantState.Active : GrantState.Overdue;
+    return (_st.payBackBy == 0 || block.timestamp < _st.payBackBy) ? GrantState.Active : GrantState.Overdue;
   }
 }

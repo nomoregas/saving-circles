@@ -31,7 +31,7 @@ not accepted, now < acceptBy    → Offered
 not accepted, now >= acceptBy   → Expired     (grantor can cancel for a refund)
 grant reclaimed                 → Defaulted   (terminal for the grant)
 paidBack >= disbursed           → PaidBack    (grant waiting) or Completed (grant paid, or no grant)
-now < payBackBy                 → Active
+no deadline, or now < payBackBy → Active
 otherwise                       → Overdue
 ```
 
@@ -43,6 +43,13 @@ otherwise                       → Overdue
   terms the grantee agreed to. The advance is paid out immediately and the clock starts:
   `payBackBy = acceptedAt + payBackPeriod`. The pay-back period is capped at 10 years
   (`MAX_PAY_BACK_PERIOD`) so a typo can't create an offer that is impossible to accept.
+- **No deadline.** A pay-back period of 0 makes the grant open-ended: it stays Active however long
+  paying back takes, and the grant can't be reclaimed. So the grant is never locked forever if the
+  grantee disappears, the grantor can later `setPayBackBy` once, at least
+  `DEADLINE_NOTICE_PERIOD` (30 days) in the future. From then on it behaves like any other
+  deadline: it can be extended, and reclaiming opens 7 days after it. `extendPayBackBy` refuses
+  open-ended grants, so the notice can't be skipped. The grantee accepts this up front: an
+  open-ended offer means "no deadline unless the grantor gives 30 days' notice".
 - **Paying back.** `payBack` accepts any amount at any time, from the grantee or anyone paying on
   their behalf. Overpayment is capped, so only what is owed is pulled. Payments are credited to the
   grantor and paid out with `collect`, which anyone can trigger.
@@ -115,9 +122,10 @@ Using a generic ERC-4626 interface keeps the contract chain-agnostic. A conditio
 ## 5. Scope (v1) and follow-ups
 
 Implemented: grantor-funded offers, late-bound grantee, terms-hash acceptance, flexible paying back
-by anyone, permissionless grant release, reclaim on default, deadline extensions, ERC-4626 escrow
-yield, a reclaim grace period and an unreleased-grant fallback, and the view surface, behind an OZ v5
-`TransparentUpgradeableProxy`, with 48 unit tests, a lifecycle fuzz test and 5 end-to-end scenarios
+by anyone, permissionless grant release, reclaim on default, deadline extensions, open-ended grants
+with a notice period for setting a deadline, ERC-4626 escrow yield, a reclaim grace period and an
+unreleased-grant fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with
+50 unit tests, a lifecycle fuzz test and 5 end-to-end scenarios
 that check solvency after each journey.
 
 Deferred: multiple grantors funding one conditional grant, more than one step (e.g. 500 then 1,000
