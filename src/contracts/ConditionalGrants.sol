@@ -22,6 +22,15 @@ using SafeERC20 for IERC20;
  */
 contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, OwnableUpgradeable {
   /// @inheritdoc IConditionalGrants
+  uint256 public constant override RECLAIM_GRACE_PERIOD = 7 days;
+
+  /// @inheritdoc IConditionalGrants
+  uint256 public constant override STUCK_GRANT_PERIOD = 90 days;
+
+  /// @inheritdoc IConditionalGrants
+  uint256 public constant override MAX_PAY_BACK_PERIOD = 3650 days;
+
+  /// @inheritdoc IConditionalGrants
   uint256 public nextId;
 
   mapping(address token => bool status) internal _allowedTokens;
@@ -87,7 +96,9 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     ) revert InvalidVault();
     if (_grantTerms.advance == 0) revert InvalidAdvance();
     if (_grantTerms.acceptBy <= block.timestamp) revert InvalidAcceptBy();
-    if (_grantTerms.payBackPeriod == 0) revert InvalidPayBackPeriod();
+    if (_grantTerms.payBackPeriod == 0 || _grantTerms.payBackPeriod > MAX_PAY_BACK_PERIOD) {
+      revert InvalidPayBackPeriod();
+    }
     if (_grantee == msg.sender) revert InvalidGrantee();
 
     _id = nextId++;
@@ -131,7 +142,9 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
 
   /// @inheritdoc IConditionalGrants
   function reclaimGrant(uint256 _id) external override nonReentrant onlyGrantor(_id) {
-    if (_state(_id) != GrantState.Overdue || _terms[_id].grant == 0) revert InvalidState();
+    GrantState _s = _state(_id);
+    if ((_s != GrantState.Overdue && _s != GrantState.PaidBack) || _terms[_id].grant == 0) revert InvalidState();
+    if (block.timestamp < _reclaimableAt(_id)) revert ReclaimTooEarly();
 
     _status[_id].grantReclaimed = true;
     uint256 _amount = _releaseAll(_id, msg.sender);
@@ -143,7 +156,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   function extendPayBackBy(uint256 _id, uint256 _newPayBackBy) external override onlyGrantor(_id) {
     GrantState _s = _state(_id);
     if (_s != GrantState.Active && _s != GrantState.Overdue) revert InvalidState();
-    if (_newPayBackBy <= _status[_id].payBackBy) revert InvalidPayBackPeriod();
+    if (_newPayBackBy <= _status[_id].payBackBy || _newPayBackBy <= block.timestamp) revert InvalidPayBackPeriod();
 
     _status[_id].payBackBy = _newPayBackBy;
 
@@ -179,6 +192,8 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
 
     uint256 _disbursed = _release(_id, _t.advance, msg.sender);
     _st.disbursed = _disbursed;
+    // A total vault loss leaves nothing to pay back: the advance counts as paid back right away.
+    if (_disbursed == 0) _st.paidBackAt = block.timestamp;
 
     // Nothing left to escrow: credit any yield earned while the offer was open to the grantor.
     if (_t.grant == 0) _creditRemainingToGrantor(_id);
@@ -196,6 +211,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     uint256 _applied = _amount < _owed ? _amount : _owed;
     _st.paidBack += _applied;
     _st.grantorOwed += _applied;
+    if (_st.paidBack == _st.disbursed) _st.paidBackAt = block.timestamp;
 
     IERC20(_terms[_id].token).safeTransferFrom(msg.sender, address(this), _applied);
 
@@ -250,6 +266,11 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   /// @inheritdoc IConditionalGrants
   function getGrantorGrants(address _grantor) external view override returns (uint256[] memory _ids) {
     _ids = _grantorGrants[_grantor];
+  }
+
+  /// @inheritdoc IConditionalGrants
+  function reclaimableAt(uint256 _id) external view override onlyExisting(_id) returns (uint256 _timestamp) {
+    _timestamp = _reclaimableAt(_id);
   }
 
   /// @inheritdoc IConditionalGrants
@@ -325,6 +346,17 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_amount == 0) return;
     _status[_id].grantorOwed += _amount;
     emit YieldCredited(_id, _amount);
+  }
+
+  /// @dev Earliest reclaim time: a grace period after the deadline while unpaid, or a long wait
+  ///      after full pay-back if the grant was never released. 0 when there is nothing to reclaim.
+  function _reclaimableAt(uint256 _id) internal view returns (uint256 _timestamp) {
+    GrantStatus storage _st = _status[_id];
+    if (_terms[_id].grant == 0 || _st.cancelled || _st.acceptedAt == 0 || _st.grantPaid || _st.grantReclaimed) {
+      return 0;
+    }
+    _timestamp =
+      _st.paidBack >= _st.disbursed ? _st.paidBackAt + STUCK_GRANT_PERIOD : _st.payBackBy + RECLAIM_GRACE_PERIOD;
   }
 
   /**

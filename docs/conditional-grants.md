@@ -41,7 +41,8 @@ otherwise                       → Overdue
 - **Acceptance.** `accept(id, termsHash)` must pass the hash of the off-chain agreement (for example
   an IPFS document with the conditions in plain language). This records on-chain exactly which
   terms the grantee agreed to. The advance is paid out immediately and the clock starts:
-  `payBackBy = acceptedAt + payBackPeriod`.
+  `payBackBy = acceptedAt + payBackPeriod`. The pay-back period is capped at 10 years
+  (`MAX_PAY_BACK_PERIOD`) so a typo can't create an offer that is impossible to accept.
 - **Paying back.** `payBack` accepts any amount at any time, from the grantee or anyone paying on
   their behalf. Overpayment is capped, so only what is owed is pulled. Payments are credited to the
   grantor and paid out with `collect`, which anyone can trigger.
@@ -50,8 +51,14 @@ otherwise                       → Overdue
   grant can only ever go to the grantee.
 - **Late payment.** After `payBackBy` the conditional grant is Overdue. The grantee can still pay back
   and claim the grant until the grantor acts. The grantor can either `extendPayBackBy` to give more
-  time or `reclaimGrant` to take the grant back. The advance remains owed after a reclaim and can
-  still be paid back, but the grant is gone.
+  time (the new deadline must be later and in the future) or `reclaimGrant` to take the grant back.
+  Reclaiming only opens `RECLAIM_GRACE_PERIOD` (7 days) after the deadline, so a grantee sending
+  their final payment around the deadline can't be front-run. The advance remains owed after a
+  reclaim and can still be paid back, but the grant is gone.
+- **Unreleased grant.** If the advance is fully paid back but nobody releases the grant for
+  `STUCK_GRANT_PERIOD` (90 days), for example because the token issuer blocklisted the grantee's
+  address, the grantor may reclaim it so it isn't locked forever. `reclaimableAt(id)` returns the
+  earliest reclaim time for either case.
 - **Cancellation.** Before acceptance the grantor can `cancel` and get everything back, including
   yield.
 
@@ -109,8 +116,9 @@ Using a generic ERC-4626 interface keeps the contract chain-agnostic. A conditio
 
 Implemented: grantor-funded offers, late-bound grantee, terms-hash acceptance, flexible paying back
 by anyone, permissionless grant release, reclaim on default, deadline extensions, ERC-4626 escrow
-yield, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 44 unit tests
-including a lifecycle fuzz test.
+yield, a reclaim grace period and an unreleased-grant fallback, and the view surface, behind an OZ v5
+`TransparentUpgradeableProxy`, with 48 unit tests, a lifecycle fuzz test and 5 end-to-end scenarios
+that check solvency after each journey.
 
 Deferred: multiple grantors funding one conditional grant, more than one step (e.g. 500 then 1,000
 then a grant), installment schedules with per-installment deadlines, yield routed to the grantee or

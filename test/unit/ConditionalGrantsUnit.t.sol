@@ -218,6 +218,18 @@ contract ConditionalGrantsUnit is Test {
     grants.create(_t, coop);
   }
 
+  function test_create_revertsPeriodAboveMax() public {
+    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    _t.payBackPeriod = grants.MAX_PAY_BACK_PERIOD() + 1;
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
+    grants.create(_t, coop);
+
+    _t.payBackPeriod = grants.MAX_PAY_BACK_PERIOD();
+    vm.prank(bread);
+    grants.create(_t, coop);
+  }
+
   function test_create_revertsSelfGrantee() public {
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidGrantee.selector);
@@ -521,7 +533,7 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(coop);
     grants.payBack(_id, 400e6);
     vault.simulateYield(20e6);
-    vm.warp(block.timestamp + PERIOD);
+    vm.warp(block.timestamp + PERIOD + grants.RECLAIM_GRACE_PERIOD());
 
     vm.prank(bread);
     grants.reclaimGrant(_id);
@@ -589,6 +601,91 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(stranger);
     vm.expectRevert(IConditionalGrants.NotGrantor.selector);
     grants.extendPayBackBy(_id, _payBackBy + 1);
+  }
+
+  function test_reclaimGrant_blockedDuringGrace() public {
+    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _payBackBy = _status(_id).payBackBy;
+
+    vm.warp(_payBackBy);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Overdue));
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.ReclaimTooEarly.selector);
+    grants.reclaimGrant(_id);
+
+    vm.warp(_payBackBy + grants.RECLAIM_GRACE_PERIOD() - 1);
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.ReclaimTooEarly.selector);
+    grants.reclaimGrant(_id);
+
+    // Paying back inside the grace period keeps the grant.
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.PaidBack));
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.ReclaimTooEarly.selector);
+    grants.reclaimGrant(_id);
+    grants.releaseGrant(_id);
+    assertEq(usdt.balanceOf(coop), START_BAL + GRANT);
+  }
+
+  function test_reclaimGrant_stuckGrantAfterPayBack() public {
+    uint256 _id = _createAccepted(address(0), GRANT);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    uint256 _paidBackAt = _status(_id).paidBackAt;
+    assertEq(_paidBackAt, block.timestamp);
+    assertEq(grants.reclaimableAt(_id), _paidBackAt + grants.STUCK_GRANT_PERIOD());
+
+    vm.warp(_paidBackAt + grants.STUCK_GRANT_PERIOD() - 1);
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.ReclaimTooEarly.selector);
+    grants.reclaimGrant(_id);
+
+    vm.warp(_paidBackAt + grants.STUCK_GRANT_PERIOD());
+    uint256 _breadBefore = usdt.balanceOf(bread);
+    vm.prank(bread);
+    grants.reclaimGrant(_id);
+    assertEq(usdt.balanceOf(bread), _breadBefore + GRANT);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.releaseGrant(_id);
+  }
+
+  function test_reclaimableAt_tracksEachPhase() public {
+    uint256 _noGrant = _createAccepted(address(0), 0);
+    assertEq(grants.reclaimableAt(_noGrant), 0);
+
+    uint256 _id = _create(address(0), GRANT);
+    assertEq(grants.reclaimableAt(_id), 0); // not accepted yet
+    vm.prank(coop);
+    grants.accept(_id, TERMS);
+    uint256 _payBackBy = _status(_id).payBackBy;
+    assertEq(grants.reclaimableAt(_id), _payBackBy + grants.RECLAIM_GRACE_PERIOD());
+
+    vm.prank(bread);
+    grants.extendPayBackBy(_id, _payBackBy + 30 days);
+    assertEq(grants.reclaimableAt(_id), _payBackBy + 30 days + grants.RECLAIM_GRACE_PERIOD());
+
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    assertEq(grants.reclaimableAt(_id), block.timestamp + grants.STUCK_GRANT_PERIOD());
+    grants.releaseGrant(_id);
+    assertEq(grants.reclaimableAt(_id), 0);
+  }
+
+  function test_extendPayBackBy_revertsIfStillInThePast() public {
+    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _payBackBy = _status(_id).payBackBy;
+    vm.warp(_payBackBy + 10 days);
+
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
+    grants.extendPayBackBy(_id, _payBackBy + 1 days); // later than before, but already past
+
+    vm.prank(bread);
+    grants.extendPayBackBy(_id, block.timestamp + 1 days);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Active));
   }
 
   // --------------------------------------------------------------------------
@@ -699,5 +796,119 @@ contract ConditionalGrantsUnit is Test {
     assertLe(_grantorGain, _yield);
     assertEq(usdt.balanceOf(address(grants)), 0);
     assertEq(vault.balanceOf(address(grants)), 0);
+  }
+
+  // --------------------------------------------------------------------------
+  // End-to-end scenarios: several conditional grants live at once, checking
+  // balances, states and solvency after each journey.
+  // --------------------------------------------------------------------------
+
+  /// @dev Without vaults, the contract must hold exactly the escrow plus grantor credits.
+  function _assertSolvent() internal view {
+    uint256 _owed;
+    for (uint256 _i = 0; _i < grants.nextId(); _i++) {
+      IConditionalGrants.GrantStatus memory _st = _status(_i);
+      _owed += _st.held + _st.grantorOwed;
+    }
+    assertEq(usdt.balanceOf(address(grants)), _owed, 'contract balance != escrow + grantor credits');
+  }
+
+  function test_scenario_happyPathWithHelpersAndOverpayment() public {
+    uint256 _id = _createAccepted(address(0), GRANT);
+    vm.prank(coop);
+    grants.payBack(_id, 300e6);
+    vm.prank(helper);
+    grants.payBack(_id, 200e6);
+    _assertSolvent();
+
+    uint256 _coopBefore = usdt.balanceOf(coop);
+    vm.prank(coop);
+    grants.payBack(_id, 10_000e6); // capped at the 500 still owed
+    assertEq(usdt.balanceOf(coop), _coopBefore - 500e6);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.PaidBack));
+
+    vm.prank(stranger);
+    grants.releaseGrant(_id);
+    vm.prank(stranger);
+    grants.collect(_id);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    assertEq(usdt.balanceOf(bread), START_BAL - GRANT, 'grantor nets out only the grant');
+    // coop paid back 800 itself (helper covered 200), kept the advance's remainder and the grant
+    assertEq(usdt.balanceOf(coop), START_BAL + ADVANCE - 800e6 + GRANT, 'grantee keeps the grant');
+    _assertSolvent();
+  }
+
+  function test_scenario_cancelAndExpiryRefundEverything() public {
+    uint256 _open = _create(address(0), GRANT);
+    vm.prank(bread);
+    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    uint256 _unnamed = grants.create(_t, address(0));
+    _assertSolvent();
+
+    vm.prank(bread);
+    grants.cancel(_open);
+    assertEq(uint256(grants.grantState(_open)), uint256(IConditionalGrants.GrantState.Cancelled));
+
+    vm.warp(_t.acceptBy);
+    assertEq(uint256(grants.grantState(_unnamed)), uint256(IConditionalGrants.GrantState.Expired));
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.setGrantee(_unnamed, coop);
+    vm.prank(bread);
+    grants.cancel(_unnamed);
+
+    assertEq(usdt.balanceOf(bread), START_BAL, 'grantor fully refunded');
+    _assertSolvent();
+  }
+
+  function test_scenario_defaultThenGranteeStillPaysBack() public {
+    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _other = _createAccepted(address(0), GRANT); // stays open alongside
+    vm.prank(coop);
+    grants.payBack(_id, 400e6);
+
+    vm.warp(_status(_id).payBackBy + grants.RECLAIM_GRACE_PERIOD());
+    vm.prank(bread);
+    grants.reclaimGrant(_id);
+    _assertSolvent();
+
+    vm.prank(coop);
+    grants.payBack(_id, 600e6);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
+    grants.collect(_id);
+    assertEq(uint256(grants.grantState(_other)), uint256(IConditionalGrants.GrantState.Overdue));
+    _assertSolvent();
+  }
+
+  function test_scenario_extendThenComplete() public {
+    uint256 _id = _createAccepted(address(0), GRANT);
+    vm.warp(_status(_id).payBackBy + 1 days);
+    vm.prank(bread);
+    grants.extendPayBackBy(_id, block.timestamp + 30 days);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Active));
+
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    grants.releaseGrant(_id);
+    grants.collect(_id);
+    assertEq(usdt.balanceOf(coop), START_BAL + GRANT);
+    _assertSolvent();
+  }
+
+  function test_scenario_zeroGrantIsAPlainAdvance() public {
+    uint256 _id = _createAccepted(address(0), 0);
+    vm.warp(_status(_id).payBackBy + grants.RECLAIM_GRACE_PERIOD());
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.reclaimGrant(_id);
+
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.releaseGrant(_id);
+    grants.collect(_id);
+    assertEq(usdt.balanceOf(bread), START_BAL);
+    _assertSolvent();
   }
 }

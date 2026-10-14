@@ -21,12 +21,15 @@ interface IConditionalGrants {
    *      Expired = 1 not accepted by acceptBy; the grantor can cancel for a full refund.
    *      Cancelled = 2 the grantor withdrew the offer before acceptance. Terminal.
    *      Active = 3 accepted, advance not fully paid back, before payBackBy.
-   *      Overdue = 4 accepted, advance not fully paid back, at/after payBackBy; the grantor may
-   *                 reclaim the grant, and the grantee may still pay back and claim it until then.
-   *      PaidBack = 5 advance fully paid back; the grant is waiting to be released to the grantee.
+   *      Overdue = 4 accepted, advance not fully paid back, at/after payBackBy. The grantee may still
+   *                 pay back and claim the grant until the grantor reclaims it, which is only
+   *                 allowed RECLAIM_GRACE_PERIOD after payBackBy.
+   *      PaidBack = 5 advance fully paid back; the grant is waiting to be released to the grantee. If
+   *                  it is still unreleased STUCK_GRANT_PERIOD after paidBackAt (e.g. the grantee
+   *                  can no longer receive the token), the grantor may reclaim it.
    *      Completed = 6 advance paid back and the grant (if any) paid to the grantee. Terminal.
-   *      Defaulted = 7 the grantor reclaimed the grant while it was Overdue. Terminal for the
-   *                   grant; any remaining advance can still be paid back.
+   *      Defaulted = 7 the grantor reclaimed the grant (late payment, or a grant left unreleased).
+   *                   Terminal for the grant; any remaining advance can still be paid back.
    */
   enum GrantState {
     Offered,
@@ -48,7 +51,8 @@ interface IConditionalGrants {
    * @param grant The amount released to the grantee once the advance is paid back; 0 makes this a
    *        plain zero-interest advance with no grant.
    * @param acceptBy Unix timestamp; the grantee must accept strictly before it.
-   * @param payBackPeriod Seconds after acceptance until an unpaid advance becomes Overdue (> 0).
+   * @param payBackPeriod Seconds after acceptance until an unpaid advance becomes Overdue
+   *        (> 0, at most MAX_PAY_BACK_PERIOD).
    * @param termsHash Hash of the off-chain agreement (e.g. an IPFS document) the grantee signs
    *        up to by passing the same hash to accept(). May be zero if no document is used.
    */
@@ -72,6 +76,7 @@ interface IConditionalGrants {
    * @param disbursed Tokens actually paid to the grantee on acceptance. Equals advance unless
    *        the vault lost value, in which case the grantee only owes what they received.
    * @param paidBack Cumulative advance paid back (never exceeds disbursed).
+   * @param paidBackAt When the advance was fully paid back, 0 until then.
    * @param held Escrow held for this conditional grant: vault shares when a vault is set, otherwise
    *        tokens.
    * @param grantorOwed Tokens credited to the grantor (payments and yield) not yet collected.
@@ -86,6 +91,7 @@ interface IConditionalGrants {
     uint256 payBackBy;
     uint256 disbursed;
     uint256 paidBack;
+    uint256 paidBackAt;
     uint256 held;
     uint256 grantorOwed;
     bool cancelled;
@@ -205,8 +211,12 @@ interface IConditionalGrants {
   /// @notice Thrown when acceptBy is not in the future
   error InvalidAcceptBy();
 
-  /// @notice Thrown when the pay-back period is zero, or an extension does not move payBackBy later
+  /// @notice Thrown when the pay-back period is zero or above MAX_PAY_BACK_PERIOD, or an extension does
+  ///         not move payBackBy later and into the future
   error InvalidPayBackPeriod();
+
+  /// @notice Thrown when the grantor reclaims the grant before reclaimableAt()
+  error ReclaimTooEarly();
 
   /// @notice Thrown when a grantee address is zero or the grantor itself
   error InvalidGrantee();
@@ -288,7 +298,9 @@ interface IConditionalGrants {
   function cancel(uint256 id) external;
 
   /**
-   * @notice Reclaim the grant of an Overdue conditional grant. The advance stays owed.
+   * @notice Reclaim the grant, either RECLAIM_GRACE_PERIOD after an unpaid advance's deadline (the
+   *         advance stays owed) or STUCK_GRANT_PERIOD after it was paid back if the grant was never
+   *         released. See reclaimableAt().
    * @param id The conditional grant id.
    */
   function reclaimGrant(uint256 id) external;
@@ -296,7 +308,7 @@ interface IConditionalGrants {
   /**
    * @notice Move the pay-back deadline later, e.g. to give the grantee more time.
    * @param id The conditional grant id.
-   * @param newPayBackBy The new deadline; must be later than the current one.
+   * @param newPayBackBy The new deadline; must be later than the current one and in the future.
    */
   function extendPayBackBy(uint256 id, uint256 newPayBackBy) external;
 
@@ -335,6 +347,33 @@ interface IConditionalGrants {
   // =======================
   // VIEWS
   // =======================
+
+  /**
+   * @notice How long after payBackBy the grantor must wait before reclaiming the grant, so a
+   *         grantee finishing late cannot be front-run at the deadline.
+   * @return period The grace period in seconds.
+   */
+  function RECLAIM_GRACE_PERIOD() external view returns (uint256 period);
+
+  /**
+   * @notice How long a paid-back grant may stay unreleased before the grantor can reclaim it.
+   * @return period The period in seconds.
+   */
+  function STUCK_GRANT_PERIOD() external view returns (uint256 period);
+
+  /**
+   * @notice The longest allowed pay-back period.
+   * @return period The period in seconds.
+   */
+  function MAX_PAY_BACK_PERIOD() external view returns (uint256 period);
+
+  /**
+   * @notice When the grantor may reclaim the grant, or 0 if it cannot be reclaimed (no grant, not
+   *         accepted, cancelled, already released or reclaimed). Moves with extendPayBackBy().
+   * @param id The conditional grant id.
+   * @return timestamp The earliest reclaim time.
+   */
+  function reclaimableAt(uint256 id) external view returns (uint256 timestamp);
 
   /**
    * @notice Get the next id that will be assigned.
