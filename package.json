@@ -14,7 +14,7 @@
     "build:optimized": "FOUNDRY_PROFILE=optimized forge build",
     "coverage": "forge coverage --report summary --report lcov --match-path 'test/unit/*' --ir-minimum",
     "deploy:celo": "bash -c 'source .env && forge script DeployCelo --rpc-url $CELO_RPC --private-key $CELO_PK --broadcast --verify --chain celo -vvvvv'",
-    "deploy:microloans:celo": "bash -c 'source .env && forge script DeployMicroloansCelo --rpc-url $CELO_RPC --private-key $CELO_PK --broadcast --verify --chain celo -vvvvv'",
+    "deploy:conditional-grants:celo": "bash -c 'source .env && forge script DeployConditionalGrantsCelo --rpc-url $CELO_RPC --private-key $CELO_PK --broadcast --verify --chain celo -vvvvv'",
     "deploy:gnosis": "bash -c 'source .env && forge script Deploy --rpc-url $GNOSIS_RPC --private-key $GNOSIS_PK --broadcast --verify --chain gnosis -vvvvv'",
     "deploy:optimism": "bash -c 'source .env && forge script Deploy --rpc-url $OPTIMISM_RPC --private-key $OPTIMISM_PK --broadcast --verify --chain optimism -vvvvv'",
     "deploy:sepolia": "bash -c 'source .env && forge script Deploy --rpc-url $SEPOLIA_RPC --private-key $SEPOLIA_PK --broadcast --verify --chain sepolia -vvvvv'",

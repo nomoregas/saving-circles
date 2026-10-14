@@ -7,7 +7,7 @@
       "contract": "src/contracts/GoalSavingCircles.sol:GoalSavingCircles"
     },
     {
-      "contract": "src/contracts/Microloans.sol:Microloans"
+      "contract": "src/contracts/ConditionalGrants.sol:ConditionalGrants"
     }
   ]
 }
