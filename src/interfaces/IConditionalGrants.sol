@@ -9,10 +9,6 @@ pragma solidity 0.8.28;
  *         pays back in any amounts, and the grant can be released to the grantee as soon as
  *         cumulative payments reach the advance. If the grantee is late, the grantor may reclaim
  *         the grant; the advance remains owed and can still be paid back.
- * @dev While money waits in escrow (the advance before acceptance, the grant until it is paid
- *      or reclaimed) it can sit in an admin-allowlisted ERC-4626 vault, such as a wrapped Aave
- *      v3 position, so it earns yield. All yield belongs to the grantor. A conditional grant's
- *      vault is fixed at create().
  */
 interface IConditionalGrants {
   /**
@@ -46,8 +42,6 @@ interface IConditionalGrants {
   /**
    * @notice Immutable terms of a conditional grant, fixed at create().
    * @param token The allowlisted ERC20 used for every transfer (e.g. USDT on Celo).
-   * @param vault An allowlisted ERC-4626 vault whose asset is `token`, holding escrowed funds so
-   *        they earn yield; address(0) keeps escrow as plain token balance.
    * @param advance The amount advanced to the grantee on acceptance (> 0).
    * @param grant The amount released to the grantee once the advance is paid back; 0 makes this a
    *        plain zero-interest advance with no grant.
@@ -60,7 +54,6 @@ interface IConditionalGrants {
    */
   struct GrantTerms {
     address token;
-    address vault;
     uint256 advance;
     uint256 grant;
     uint256 acceptBy;
@@ -75,13 +68,11 @@ interface IConditionalGrants {
    * @param acceptedAt Acceptance timestamp, 0 until accepted.
    * @param payBackBy Timestamp at which an unpaid advance becomes Overdue, 0 until accepted or while
    *        an open-ended grant has no deadline. The grantor may push it later with extendPayBackBy().
-   * @param disbursed Tokens actually paid to the grantee on acceptance. Equals advance unless
-   *        the vault lost value, in which case the grantee only owes what they received.
-   * @param paidBack Cumulative advance paid back (never exceeds disbursed).
+   * @param paidBack Cumulative advance paid back (never exceeds advance).
    * @param paidBackAt When the advance was fully paid back, 0 until then.
-   * @param held Escrow held for this conditional grant: vault shares when a vault is set, otherwise
-   *        tokens.
-   * @param grantorOwed Tokens credited to the grantor (payments and yield) not yet collected.
+   * @param held Tokens escrowed for this conditional grant: advance + grant before acceptance, then
+   *        the grant until it is released or reclaimed.
+   * @param grantorOwed Payments credited to the grantor and not yet collected.
    * @param cancelled Whether the grantor cancelled before acceptance.
    * @param grantPaid Whether the grant was released to the grantee.
    * @param grantReclaimed Whether the grantor reclaimed the grant after it went Overdue.
@@ -91,7 +82,6 @@ interface IConditionalGrants {
     address grantee;
     uint256 acceptedAt;
     uint256 payBackBy;
-    uint256 disbursed;
     uint256 paidBack;
     uint256 paidBackAt;
     uint256 held;
@@ -113,13 +103,6 @@ interface IConditionalGrants {
   event TokenAllowed(address indexed token, bool indexed allowed);
 
   /**
-   * @notice Emitted when the admin allows or disallows an ERC-4626 vault for new grants.
-   * @param vault The vault address.
-   * @param allowed Whether the vault is now allowed.
-   */
-  event VaultAllowed(address indexed vault, bool indexed allowed);
-
-  /**
    * @notice Emitted when a grantor creates and funds a conditional grant offer.
    * @param id The new conditional grant id.
    * @param grantor The grantor.
@@ -138,7 +121,7 @@ interface IConditionalGrants {
   /**
    * @notice Emitted when the grantor cancels an offer and is refunded.
    * @param id The conditional grant id.
-   * @param refunded Tokens returned to the grantor, including any yield.
+   * @param refunded Tokens returned to the grantor.
    */
   event GrantCancelled(uint256 indexed id, uint256 refunded);
 
@@ -146,10 +129,10 @@ interface IConditionalGrants {
    * @notice Emitted when the grantee accepts the terms and receives the advance.
    * @param id The conditional grant id.
    * @param grantee The grantee.
-   * @param disbursed Tokens paid to the grantee.
-   * @param payBackBy The timestamp at which it becomes Overdue.
+   * @param advance Tokens paid to the grantee.
+   * @param payBackBy The timestamp at which it becomes Overdue, or 0 for an open-ended grant.
    */
-  event GrantAccepted(uint256 indexed id, address indexed grantee, uint256 disbursed, uint256 payBackBy);
+  event GrantAccepted(uint256 indexed id, address indexed grantee, uint256 advance, uint256 payBackBy);
 
   /**
    * @notice Emitted when part of the advance is paid back.
@@ -171,7 +154,7 @@ interface IConditionalGrants {
   /**
    * @notice Emitted when the grantor reclaims the grant of an Overdue conditional grant.
    * @param id The conditional grant id.
-   * @param amount Tokens returned to the grantor, including any yield.
+   * @param amount Tokens returned to the grantor.
    */
   event GrantReclaimed(uint256 indexed id, uint256 amount);
 
@@ -190,14 +173,7 @@ interface IConditionalGrants {
   event PayBackBySet(uint256 indexed id, uint256 payBackBy);
 
   /**
-   * @notice Emitted when yield earned on escrow is credited to the grantor.
-   * @param id The conditional grant id.
-   * @param amount Tokens credited.
-   */
-  event YieldCredited(uint256 indexed id, uint256 amount);
-
-  /**
-   * @notice Emitted when the grantor's credited payments and yield are paid out.
+   * @notice Emitted when the grantor's credited payments are paid out.
    * @param id The conditional grant id.
    * @param grantor The grantor.
    * @param amount Tokens paid.
@@ -210,9 +186,6 @@ interface IConditionalGrants {
 
   /// @notice Thrown when a token is not allowlisted
   error TokenNotAllowed();
-
-  /// @notice Thrown when a vault is not allowlisted or its asset is not the token
-  error InvalidVault();
 
   /// @notice Thrown when the advance is zero
   error InvalidAdvance();
@@ -261,7 +234,7 @@ interface IConditionalGrants {
 
   /**
    * @notice Initialize the contract behind its proxy.
-   * @param owner The admin that manages the token and vault allowlists.
+   * @param owner The admin that manages the token allowlist.
    */
   function initialize(address owner) external;
 
@@ -272,15 +245,6 @@ interface IConditionalGrants {
    * @param allowed Whether to allow it.
    */
   function setTokenAllowed(address token, bool allowed) external;
-
-  /**
-   * @notice Allow or disallow an ERC-4626 vault for new grants.
-   * @dev Only vaults that do not charge withdrawal fees should be allowed. Existing conditional grants keep
-   *      the vault they were created with.
-   * @param vault The vault.
-   * @param allowed Whether to allow it.
-   */
-  function setVaultAllowed(address vault, bool allowed) external;
 
   // =======================
   // GRANTOR
@@ -332,7 +296,7 @@ interface IConditionalGrants {
   function setPayBackBy(uint256 id, uint256 payBackBy) external;
 
   /**
-   * @notice Pay the grantor all credited payments and yield. Callable by anyone.
+   * @notice Pay the grantor all credited payments. Callable by anyone.
    * @param id The conditional grant id.
    */
   function collect(uint256 id) external;
@@ -422,18 +386,11 @@ interface IConditionalGrants {
   function grantState(uint256 id) external view returns (GrantState state);
 
   /**
-   * @notice Get the advance still owed: disbursed minus paid back (0 before acceptance).
+   * @notice Get the advance still owed: advance minus paid back (0 before acceptance).
    * @param id The conditional grant id.
    * @return amount The outstanding advance.
    */
   function outstanding(uint256 id) external view returns (uint256 amount);
-
-  /**
-   * @notice Get the current token value of this conditional grant's escrow, including unrealized yield.
-   * @param id The conditional grant id.
-   * @return amount The escrow value in tokens.
-   */
-  function escrowValue(uint256 id) external view returns (uint256 amount);
 
   /**
    * @notice Get all conditional grant ids created by a grantor.
@@ -455,11 +412,4 @@ interface IConditionalGrants {
    * @return allowed Whether it is allowed.
    */
   function isTokenAllowed(address token) external view returns (bool allowed);
-
-  /**
-   * @notice Check whether a vault is allowed for new grants.
-   * @param vault The vault.
-   * @return allowed Whether it is allowed.
-   */
-  function isVaultAllowed(address vault) external view returns (bool allowed);
 }

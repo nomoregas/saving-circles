@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import {OwnableUpgradeable} from '@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol';
 import {ReentrancyGuardUpgradeable} from '@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol';
-import {IERC4626} from '@openzeppelin/contracts/interfaces/IERC4626.sol';
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {SafeERC20} from '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 
@@ -15,9 +14,7 @@ using SafeERC20 for IERC20;
  * @title ConditionalGrants
  * @notice Conditional grants: a grantor funds a zero-interest advance plus an optional grant, the
  *         named grantee accepts the exact terms and receives the advance, and the grant unlocks once
- *         the advance is paid back in full. Escrowed funds can earn yield in an allowlisted ERC-4626
- *         vault; all yield belongs to the grantor. See docs/conditional-grants.md for the design
- *         rationale.
+ *         the advance is paid back in full. See docs/conditional-grants.md for the design rationale.
  * @author Breadchain Collective
  */
 contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, OwnableUpgradeable {
@@ -37,7 +34,6 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   uint256 public nextId;
 
   mapping(address token => bool status) internal _allowedTokens;
-  mapping(address vault => bool status) internal _allowedVaults;
   mapping(uint256 id => GrantTerms terms) internal _terms;
   mapping(uint256 id => GrantStatus status) internal _status;
   mapping(address grantor => uint256[] ids) internal _grantorGrants;
@@ -77,12 +73,6 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     emit TokenAllowed(_token, _allowed);
   }
 
-  /// @inheritdoc IConditionalGrants
-  function setVaultAllowed(address _vault, bool _allowed) external override onlyOwner {
-    _allowedVaults[_vault] = _allowed;
-    emit VaultAllowed(_vault, _allowed);
-  }
-
   // =======================
   // GRANTOR
   // =======================
@@ -93,10 +83,6 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     address _grantee
   ) external override nonReentrant returns (uint256 _id) {
     if (!_allowedTokens[_grantTerms.token]) revert TokenNotAllowed();
-    if (
-      _grantTerms.vault != address(0)
-        && (!_allowedVaults[_grantTerms.vault] || IERC4626(_grantTerms.vault).asset() != _grantTerms.token)
-    ) revert InvalidVault();
     if (_grantTerms.advance == 0) revert InvalidAdvance();
     if (_grantTerms.acceptBy <= block.timestamp) revert InvalidAcceptBy();
     if (_grantTerms.payBackPeriod > MAX_PAY_BACK_PERIOD) revert InvalidPayBackPeriod();
@@ -112,8 +98,8 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     }
 
     uint256 _total = _grantTerms.advance + _grantTerms.grant;
+    _status[_id].held = _total;
     IERC20(_grantTerms.token).safeTransferFrom(msg.sender, address(this), _total);
-    _escrow(_id, _total);
 
     emit GrantCreated(_id, msg.sender, _grantee, _grantTerms);
   }
@@ -136,7 +122,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_s != GrantState.Offered && _s != GrantState.Expired) revert InvalidState();
 
     _status[_id].cancelled = true;
-    uint256 _refunded = _releaseAll(_id, msg.sender);
+    uint256 _refunded = _releaseHeld(_id, msg.sender);
 
     emit GrantCancelled(_id, _refunded);
   }
@@ -148,7 +134,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (block.timestamp < _reclaimableAt(_id)) revert ReclaimTooEarly();
 
     _status[_id].grantReclaimed = true;
-    uint256 _amount = _releaseAll(_id, msg.sender);
+    uint256 _amount = _releaseHeld(_id, msg.sender);
 
     emit GrantReclaimed(_id, _amount);
   }
@@ -204,28 +190,24 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     // A zero pay-back period means no deadline until the grantor sets one with setPayBackBy.
     if (_t.payBackPeriod != 0) _st.payBackBy = block.timestamp + _t.payBackPeriod;
 
-    uint256 _disbursed = _release(_id, _t.advance, msg.sender);
-    _st.disbursed = _disbursed;
-    // A total vault loss leaves nothing to pay back: the advance counts as paid back right away.
-    if (_disbursed == 0) _st.paidBackAt = block.timestamp;
+    _st.held -= _t.advance;
+    IERC20(_t.token).safeTransfer(msg.sender, _t.advance);
 
-    // Nothing left to escrow: credit any yield earned while the offer was open to the grantor.
-    if (_t.grant == 0) _creditRemainingToGrantor(_id);
-
-    emit GrantAccepted(_id, msg.sender, _disbursed, _st.payBackBy);
+    emit GrantAccepted(_id, msg.sender, _t.advance, _st.payBackBy);
   }
 
   /// @inheritdoc IConditionalGrants
   function payBack(uint256 _id, uint256 _amount) external override nonReentrant onlyExisting(_id) {
     if (_amount == 0) revert InvalidAmount();
     GrantStatus storage _st = _status[_id];
-    if (_st.acceptedAt == 0 || _st.paidBack >= _st.disbursed) revert InvalidState();
+    uint256 _advance = _terms[_id].advance;
+    if (_st.acceptedAt == 0 || _st.paidBack >= _advance) revert InvalidState();
 
-    uint256 _owed = _st.disbursed - _st.paidBack;
+    uint256 _owed = _advance - _st.paidBack;
     uint256 _applied = _amount < _owed ? _amount : _owed;
     _st.paidBack += _applied;
     _st.grantorOwed += _applied;
-    if (_st.paidBack == _st.disbursed) _st.paidBackAt = block.timestamp;
+    if (_st.paidBack == _advance) _st.paidBackAt = block.timestamp;
 
     IERC20(_terms[_id].token).safeTransferFrom(msg.sender, address(this), _applied);
 
@@ -238,8 +220,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
 
     GrantStatus storage _st = _status[_id];
     _st.grantPaid = true;
-    uint256 _paid = _release(_id, _terms[_id].grant, _st.grantee);
-    _creditRemainingToGrantor(_id);
+    uint256 _paid = _releaseHeld(_id, _st.grantee);
 
     emit GrantReleased(_id, _st.grantee, _paid);
   }
@@ -267,14 +248,8 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
 
   /// @inheritdoc IConditionalGrants
   function outstanding(uint256 _id) external view override onlyExisting(_id) returns (uint256 _amount) {
-    _amount = _status[_id].disbursed - _status[_id].paidBack;
-  }
-
-  /// @inheritdoc IConditionalGrants
-  function escrowValue(uint256 _id) external view override onlyExisting(_id) returns (uint256 _amount) {
-    address _vault = _terms[_id].vault;
-    uint256 _held = _status[_id].held;
-    _amount = _vault == address(0) ? _held : IERC4626(_vault).convertToAssets(_held);
+    GrantStatus storage _st = _status[_id];
+    if (_st.acceptedAt != 0) _amount = _terms[_id].advance - _st.paidBack;
   }
 
   /// @inheritdoc IConditionalGrants
@@ -297,69 +272,15 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     _allowed = _allowedTokens[_token];
   }
 
-  /// @inheritdoc IConditionalGrants
-  function isVaultAllowed(address _vault) external view override returns (bool _allowed) {
-    _allowed = _allowedVaults[_vault];
-  }
-
   // =======================
   // INTERNAL
   // =======================
 
-  /// @dev Put tokens already held by this contract into the conditional grant's escrow (vault or plain balance).
-  function _escrow(uint256 _id, uint256 _amount) internal {
-    address _vault = _terms[_id].vault;
-    if (_vault == address(0)) {
-      _status[_id].held += _amount;
-      return;
-    }
-    IERC20(_terms[_id].token).forceApprove(_vault, _amount);
-    _status[_id].held += IERC4626(_vault).deposit(_amount, address(this));
-  }
-
-  /**
-   * @dev Pay up to `_amount` tokens out of the conditional grant's escrow to `_to`. If the vault cannot cover
-   *      the full amount (it lost value), everything left in escrow is paid instead.
-   * @return _paid The tokens actually paid.
-   */
-  function _release(uint256 _id, uint256 _amount, address _to) internal returns (uint256 _paid) {
-    GrantStatus storage _st = _status[_id];
-    address _vault = _terms[_id].vault;
-    if (_vault == address(0)) {
-      _paid = _amount <= _st.held ? _amount : _st.held;
-      _st.held -= _paid;
-      IERC20(_terms[_id].token).safeTransfer(_to, _paid);
-      return _paid;
-    }
-    if (IERC4626(_vault).previewWithdraw(_amount) <= _st.held) {
-      _st.held -= IERC4626(_vault).withdraw(_amount, _to, address(this));
-      _paid = _amount;
-    } else {
-      uint256 _shares = _st.held;
-      _st.held = 0;
-      _paid = IERC4626(_vault).redeem(_shares, _to, address(this));
-    }
-  }
-
-  /// @dev Pay the conditional grant's entire escrow, including yield, to `_to`.
-  function _releaseAll(uint256 _id, address _to) internal returns (uint256 _paid) {
-    GrantStatus storage _st = _status[_id];
-    uint256 _held = _st.held;
-    _st.held = 0;
-    address _vault = _terms[_id].vault;
-    if (_vault == address(0)) {
-      if (_held > 0 && _to != address(this)) IERC20(_terms[_id].token).safeTransfer(_to, _held);
-      return _held;
-    }
-    if (_held > 0) _paid = IERC4626(_vault).redeem(_held, _to, address(this));
-  }
-
-  /// @dev Convert whatever is left in escrow (yield and rounding dust) into a grantor credit.
-  function _creditRemainingToGrantor(uint256 _id) internal {
-    uint256 _amount = _releaseAll(_id, address(this));
-    if (_amount == 0) return;
-    _status[_id].grantorOwed += _amount;
-    emit YieldCredited(_id, _amount);
+  /// @dev Pay everything still escrowed for the conditional grant to `_to`.
+  function _releaseHeld(uint256 _id, address _to) internal returns (uint256 _paid) {
+    _paid = _status[_id].held;
+    _status[_id].held = 0;
+    if (_paid > 0) IERC20(_terms[_id].token).safeTransfer(_to, _paid);
   }
 
   /// @dev Earliest reclaim time: a grace period after the deadline while unpaid, or a long wait
@@ -370,7 +291,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_terms[_id].grant == 0 || _st.cancelled || _st.acceptedAt == 0 || _st.grantPaid || _st.grantReclaimed) {
       return 0;
     }
-    if (_st.paidBack >= _st.disbursed) return _st.paidBackAt + STUCK_GRANT_PERIOD;
+    if (_st.paidBack >= _terms[_id].advance) return _st.paidBackAt + STUCK_GRANT_PERIOD;
     // Open-ended and no deadline set yet: nothing can be reclaimed.
     if (_st.payBackBy == 0) return 0;
     _timestamp = _st.payBackBy + RECLAIM_GRACE_PERIOD;
@@ -387,7 +308,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
       return block.timestamp < _terms[_id].acceptBy ? GrantState.Offered : GrantState.Expired;
     }
     if (_st.grantReclaimed) return GrantState.Defaulted;
-    if (_st.paidBack >= _st.disbursed) {
+    if (_st.paidBack >= _terms[_id].advance) {
       return (_st.grantPaid || _terms[_id].grant == 0) ? GrantState.Completed : GrantState.PaidBack;
     }
     return (_st.payBackBy == 0 || block.timestamp < _st.payBackBy) ? GrantState.Active : GrantState.Overdue;

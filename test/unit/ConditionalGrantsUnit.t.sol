@@ -4,13 +4,11 @@ pragma solidity 0.8.28;
 import {OwnableUpgradeable} from '@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol';
 import {ProxyAdmin} from '@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol';
 import {TransparentUpgradeableProxy} from '@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol';
-import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {Test} from 'forge-std/Test.sol';
 
 import {ConditionalGrants} from 'src/contracts/ConditionalGrants.sol';
 import {IConditionalGrants} from 'src/interfaces/IConditionalGrants.sol';
 import {MockERC20} from 'test/mocks/MockERC20.sol';
-import {MockERC4626} from 'test/mocks/MockERC4626.sol';
 
 /// @dev 6-decimal token so the tests exercise the same units as USDT on Celo.
 contract MockUSDT is MockERC20 {
@@ -29,7 +27,6 @@ contract MockUSDT is MockERC20 {
 contract ConditionalGrantsUnit is Test {
   ConditionalGrants public grants;
   MockUSDT public usdt;
-  MockERC4626 public vault;
 
   uint256 public constant ADVANCE = 1000e6;
   uint256 public constant GRANT = 1000e6;
@@ -56,9 +53,7 @@ contract ConditionalGrantsUnit is Test {
       )
     );
     usdt = new MockUSDT();
-    vault = new MockERC4626(IERC20(address(usdt)));
     grants.setTokenAllowed(address(usdt), true);
-    grants.setVaultAllowed(address(vault), true);
     vm.stopPrank();
 
     address[4] memory holders = [bread, coop, helper, stranger];
@@ -73,10 +68,9 @@ contract ConditionalGrantsUnit is Test {
   // Helpers
   // --------------------------------------------------------------------------
 
-  function _terms(address _vault, uint256 _grant) internal view returns (IConditionalGrants.GrantTerms memory) {
+  function _terms(uint256 _grant) internal view returns (IConditionalGrants.GrantTerms memory) {
     return IConditionalGrants.GrantTerms({
       token: address(usdt),
-      vault: _vault,
       advance: ADVANCE,
       grant: _grant,
       acceptBy: block.timestamp + ACCEPT_WINDOW,
@@ -85,13 +79,13 @@ contract ConditionalGrantsUnit is Test {
     });
   }
 
-  function _create(address _vault, uint256 _grant) internal returns (uint256 _id) {
+  function _create(uint256 _grant) internal returns (uint256 _id) {
     vm.prank(bread);
-    _id = grants.create(_terms(_vault, _grant), coop);
+    _id = grants.create(_terms(_grant), coop);
   }
 
-  function _createAccepted(address _vault, uint256 _grant) internal returns (uint256 _id) {
-    _id = _create(_vault, _grant);
+  function _createAccepted(uint256 _grant) internal returns (uint256 _id) {
+    _id = _create(_grant);
     vm.prank(coop);
     grants.accept(_id, TERMS);
   }
@@ -115,23 +109,13 @@ contract ConditionalGrantsUnit is Test {
     grants.setTokenAllowed(address(usdt), false);
   }
 
-  function test_setVaultAllowed_onlyOwner() public {
-    vm.prank(stranger);
-    vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, stranger));
-    grants.setVaultAllowed(address(vault), false);
-  }
-
   function test_allowlists_emitAndToggle() public {
     vm.startPrank(owner);
     vm.expectEmit(true, true, false, false);
     emit IConditionalGrants.TokenAllowed(address(usdt), false);
     grants.setTokenAllowed(address(usdt), false);
-    vm.expectEmit(true, true, false, false);
-    emit IConditionalGrants.VaultAllowed(address(vault), false);
-    grants.setVaultAllowed(address(vault), false);
     vm.stopPrank();
     assertFalse(grants.isTokenAllowed(address(usdt)));
-    assertFalse(grants.isVaultAllowed(address(vault)));
   }
 
   // --------------------------------------------------------------------------
@@ -139,13 +123,13 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_create_pullsAdvancePlusGrant() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     assertEq(_id, 0);
     assertEq(grants.nextId(), 1);
     assertEq(usdt.balanceOf(bread), START_BAL - ADVANCE - GRANT);
     assertEq(usdt.balanceOf(address(grants)), ADVANCE + GRANT);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Offered));
-    assertEq(grants.escrowValue(_id), ADVANCE + GRANT);
+    assertEq(_status(_id).held, ADVANCE + GRANT);
     assertEq(grants.getGrantorGrants(bread)[0], _id);
     assertEq(grants.getGranteeGrants(coop)[0], _id);
     IConditionalGrants.GrantStatus memory _st = _status(_id);
@@ -153,15 +137,8 @@ contract ConditionalGrantsUnit is Test {
     assertEq(_st.grantee, coop);
   }
 
-  function test_create_depositsIntoVault() public {
-    uint256 _id = _create(address(vault), GRANT);
-    assertEq(usdt.balanceOf(address(grants)), 0);
-    assertEq(vault.balanceOf(address(grants)), _status(_id).held);
-    assertEq(grants.escrowValue(_id), ADVANCE + GRANT);
-  }
-
   function test_create_emits() public {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     vm.expectEmit(true, true, true, true);
     emit IConditionalGrants.GrantCreated(0, bread, coop, _t);
     vm.prank(bread);
@@ -169,33 +146,15 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_create_revertsTokenNotAllowed() public {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     _t.token = address(0xdead);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.TokenNotAllowed.selector);
     grants.create(_t, coop);
   }
 
-  function test_create_revertsVaultNotAllowed() public {
-    vm.prank(owner);
-    grants.setVaultAllowed(address(vault), false);
-    vm.prank(bread);
-    vm.expectRevert(IConditionalGrants.InvalidVault.selector);
-    grants.create(_terms(address(vault), GRANT), coop);
-  }
-
-  function test_create_revertsVaultAssetMismatch() public {
-    MockERC20 _other = new MockERC20('Other', 'OTH');
-    MockERC4626 _otherVault = new MockERC4626(IERC20(address(_other)));
-    vm.prank(owner);
-    grants.setVaultAllowed(address(_otherVault), true);
-    vm.prank(bread);
-    vm.expectRevert(IConditionalGrants.InvalidVault.selector);
-    grants.create(_terms(address(_otherVault), GRANT), coop);
-  }
-
   function test_create_revertsZeroAdvance() public {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     _t.advance = 0;
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidAdvance.selector);
@@ -203,7 +162,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_create_revertsAcceptByNotInFuture() public {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     _t.acceptBy = block.timestamp;
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidAcceptBy.selector);
@@ -211,7 +170,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_create_revertsPeriodAboveMax() public {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     _t.payBackPeriod = grants.MAX_PAY_BACK_PERIOD() + 1;
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
@@ -225,7 +184,7 @@ contract ConditionalGrantsUnit is Test {
   function test_create_revertsSelfGrantee() public {
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidGrantee.selector);
-    grants.create(_terms(address(0), GRANT), bread);
+    grants.create(_terms(GRANT), bread);
   }
 
   // --------------------------------------------------------------------------
@@ -234,7 +193,7 @@ contract ConditionalGrantsUnit is Test {
 
   function test_setGrantee_namesGranteeLater() public {
     vm.prank(bread);
-    uint256 _id = grants.create(_terms(address(0), GRANT), address(0));
+    uint256 _id = grants.create(_terms(GRANT), address(0));
     assertEq(grants.getGranteeGrants(coop).length, 0);
 
     vm.expectEmit(true, true, false, false);
@@ -250,7 +209,7 @@ contract ConditionalGrantsUnit is Test {
 
   function test_setGrantee_reverts() public {
     vm.prank(bread);
-    uint256 _id = grants.create(_terms(address(0), GRANT), address(0));
+    uint256 _id = grants.create(_terms(GRANT), address(0));
 
     vm.prank(stranger);
     vm.expectRevert(IConditionalGrants.NotGrantor.selector);
@@ -272,7 +231,7 @@ contract ConditionalGrantsUnit is Test {
 
   function test_setGrantee_revertsAfterExpiry() public {
     vm.prank(bread);
-    uint256 _id = grants.create(_terms(address(0), GRANT), address(0));
+    uint256 _id = grants.create(_terms(GRANT), address(0));
     vm.warp(block.timestamp + ACCEPT_WINDOW);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
@@ -284,7 +243,7 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_cancel_refundsOffered() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     vm.expectEmit(true, false, false, true);
     emit IConditionalGrants.GrantCancelled(_id, ADVANCE + GRANT);
     vm.prank(bread);
@@ -293,19 +252,18 @@ contract ConditionalGrantsUnit is Test {
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Cancelled));
   }
 
-  function test_cancel_refundsExpiredWithYield() public {
-    uint256 _id = _create(address(vault), GRANT);
-    vault.simulateYield(10e6);
+  function test_cancel_refundsExpired() public {
+    uint256 _id = _create(GRANT);
     vm.warp(block.timestamp + ACCEPT_WINDOW);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Expired));
     vm.prank(bread);
     grants.cancel(_id);
-    assertApproxEqAbs(usdt.balanceOf(bread), START_BAL + 10e6, 1);
-    assertEq(vault.balanceOf(address(grants)), 0);
+    assertEq(usdt.balanceOf(bread), START_BAL);
+    assertEq(usdt.balanceOf(address(grants)), 0);
   }
 
   function test_cancel_reverts() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     vm.prank(stranger);
     vm.expectRevert(IConditionalGrants.NotGrantor.selector);
     grants.cancel(_id);
@@ -322,42 +280,23 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_accept_disbursesAdvance() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     vm.expectEmit(true, true, false, true);
     emit IConditionalGrants.GrantAccepted(_id, coop, ADVANCE, block.timestamp + PERIOD);
     vm.prank(coop);
     grants.accept(_id, TERMS);
 
     assertEq(usdt.balanceOf(coop), START_BAL + ADVANCE);
-    assertEq(grants.escrowValue(_id), GRANT);
+    assertEq(_status(_id).held, GRANT);
     assertEq(grants.outstanding(_id), ADVANCE);
     IConditionalGrants.GrantStatus memory _st = _status(_id);
     assertEq(_st.acceptedAt, block.timestamp);
     assertEq(_st.payBackBy, block.timestamp + PERIOD);
-    assertEq(_st.disbursed, ADVANCE);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Active));
   }
 
-  function test_accept_fromVaultKeepsGrantEarning() public {
-    uint256 _id = _createAccepted(address(vault), GRANT);
-    assertEq(usdt.balanceOf(coop), START_BAL + ADVANCE);
-    assertApproxEqAbs(grants.escrowValue(_id), GRANT, 1);
-    vault.simulateYield(50e6);
-    assertGt(grants.escrowValue(_id), GRANT);
-  }
-
-  function test_accept_noGrantCreditsOfferYieldToGrantor() public {
-    uint256 _id = _create(address(vault), 0);
-    vault.simulateYield(5e6);
-    vm.prank(coop);
-    grants.accept(_id, TERMS);
-    assertEq(usdt.balanceOf(coop), START_BAL + ADVANCE);
-    assertEq(_status(_id).held, 0);
-    assertApproxEqAbs(_status(_id).grantorOwed, 5e6, 1);
-  }
-
   function test_accept_reverts() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
 
     vm.prank(stranger);
     vm.expectRevert(IConditionalGrants.NotGrantee.selector);
@@ -377,14 +316,14 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_accept_revertsTwice() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.accept(_id, TERMS);
   }
 
   function test_accept_revertsWhenCancelled() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     vm.prank(bread);
     grants.cancel(_id);
     vm.prank(coop);
@@ -397,7 +336,7 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_payBack_installmentsUnlockGrant() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     for (uint256 i = 0; i < 9; i++) {
       vm.prank(coop);
       grants.payBack(_id, 100e6);
@@ -414,7 +353,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_payBack_capsAtOutstanding() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     grants.payBack(_id, 5000e6);
     assertEq(_status(_id).paidBack, ADVANCE);
@@ -422,7 +361,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_payBack_byHelper() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(helper);
     grants.payBack(_id, ADVANCE);
     assertEq(usdt.balanceOf(helper), START_BAL - ADVANCE);
@@ -430,7 +369,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_payBack_reverts() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     vm.prank(coop);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.payBack(_id, 1);
@@ -452,7 +391,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_payBack_lateStillUnlocksIfNotReclaimed() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.warp(block.timestamp + PERIOD + 30 days);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Overdue));
     vm.prank(coop);
@@ -466,7 +405,7 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_releaseGrant_paysGranteePermissionlessly() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     grants.payBack(_id, ADVANCE);
 
@@ -477,26 +416,11 @@ contract ConditionalGrantsUnit is Test {
 
     assertEq(usdt.balanceOf(coop), START_BAL + GRANT);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
-    assertEq(grants.escrowValue(_id), 0);
-  }
-
-  function test_releaseGrant_yieldGoesToGrantor() public {
-    uint256 _id = _createAccepted(address(vault), GRANT);
-    vault.simulateYield(40e6);
-    vm.prank(coop);
-    grants.payBack(_id, ADVANCE);
-    grants.releaseGrant(_id);
-
-    assertEq(usdt.balanceOf(coop), START_BAL + GRANT);
-    uint256 _owed = _status(_id).grantorOwed;
-    assertApproxEqAbs(_owed, ADVANCE + 40e6, 2);
-    grants.collect(_id);
-    assertApproxEqAbs(usdt.balanceOf(bread), START_BAL - ADVANCE - GRANT + ADVANCE + 40e6, 2);
-    assertEq(vault.balanceOf(address(grants)), 0);
+    assertEq(_status(_id).held, 0);
   }
 
   function test_releaseGrant_reverts() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.releaseGrant(_id);
 
@@ -508,7 +432,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_noGrant_completesOnPayBack() public {
-    uint256 _id = _createAccepted(address(0), 0);
+    uint256 _id = _createAccepted(0);
     vm.prank(coop);
     grants.payBack(_id, ADVANCE);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
@@ -521,16 +445,15 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_reclaimGrant_whenOverdue() public {
-    uint256 _id = _createAccepted(address(vault), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     grants.payBack(_id, 400e6);
-    vault.simulateYield(20e6);
     vm.warp(block.timestamp + PERIOD + grants.RECLAIM_GRACE_PERIOD());
 
     vm.prank(bread);
     grants.reclaimGrant(_id);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
-    assertApproxEqAbs(usdt.balanceOf(bread), START_BAL - ADVANCE - GRANT + GRANT + 20e6, 2);
+    assertEq(usdt.balanceOf(bread), START_BAL - ADVANCE);
 
     // The advance is still owed and can be paid back after default, but the grant is gone.
     vm.prank(coop);
@@ -543,7 +466,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_reclaimGrant_reverts() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.reclaimGrant(_id);
@@ -553,7 +476,7 @@ contract ConditionalGrantsUnit is Test {
     vm.expectRevert(IConditionalGrants.NotGrantor.selector);
     grants.reclaimGrant(_id);
 
-    uint256 _noGrant = _createAccepted(address(0), 0);
+    uint256 _noGrant = _createAccepted(0);
     vm.warp(block.timestamp + PERIOD);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
@@ -561,7 +484,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_extendPayBackBy_rescuesOverdueGrant() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     uint256 _payBackBy = _status(_id).payBackBy;
     vm.warp(_payBackBy);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Overdue));
@@ -578,7 +501,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_extendPayBackBy_reverts() public {
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.extendPayBackBy(_id, block.timestamp + 1000 days);
@@ -600,7 +523,7 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function _createOpenEnded() internal returns (uint256 _id) {
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     _t.payBackPeriod = 0;
     vm.prank(bread);
     _id = grants.create(_t, coop);
@@ -668,12 +591,12 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_setPayBackBy_revertsOnFixedDeadlineOrWrongState() public {
-    uint256 _fixed = _createAccepted(address(0), GRANT);
+    uint256 _fixed = _createAccepted(GRANT);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.setPayBackBy(_fixed, block.timestamp + 365 days);
 
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     _t.payBackPeriod = 0;
     vm.prank(bread);
     uint256 _offered = grants.create(_t, coop);
@@ -691,7 +614,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_reclaimGrant_blockedDuringGrace() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     uint256 _payBackBy = _status(_id).payBackBy;
 
     vm.warp(_payBackBy);
@@ -717,7 +640,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_reclaimGrant_stuckGrantAfterPayBack() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     grants.payBack(_id, ADVANCE);
     uint256 _paidBackAt = _status(_id).paidBackAt;
@@ -740,10 +663,10 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_reclaimableAt_tracksEachPhase() public {
-    uint256 _noGrant = _createAccepted(address(0), 0);
+    uint256 _noGrant = _createAccepted(0);
     assertEq(grants.reclaimableAt(_noGrant), 0);
 
-    uint256 _id = _create(address(0), GRANT);
+    uint256 _id = _create(GRANT);
     assertEq(grants.reclaimableAt(_id), 0); // not accepted yet
     vm.prank(coop);
     grants.accept(_id, TERMS);
@@ -762,7 +685,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_extendPayBackBy_revertsIfStillInThePast() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     uint256 _payBackBy = _status(_id).payBackBy;
     vm.warp(_payBackBy + 10 days);
 
@@ -780,7 +703,7 @@ contract ConditionalGrantsUnit is Test {
   // --------------------------------------------------------------------------
 
   function test_collect_paysGrantor() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     grants.payBack(_id, 300e6);
 
@@ -795,77 +718,20 @@ contract ConditionalGrantsUnit is Test {
   }
 
   // --------------------------------------------------------------------------
-  // Vault loss
-  // --------------------------------------------------------------------------
-
-  function test_vaultLoss_granteeOwesOnlyWhatWasDisbursed() public {
-    uint256 _id = _create(address(vault), GRANT);
-    vault.simulateLoss(1500e6);
-    vm.prank(coop);
-    grants.accept(_id, TERMS);
-
-    uint256 _disbursed = _status(_id).disbursed;
-    assertLt(_disbursed, ADVANCE);
-    assertEq(grants.outstanding(_id), _disbursed);
-    assertEq(_status(_id).held, 0);
-
-    vm.prank(coop);
-    grants.payBack(_id, ADVANCE);
-    assertEq(_status(_id).paidBack, _disbursed);
-    grants.releaseGrant(_id);
-    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
-  }
-
-  function test_vaultLoss_grantPaysWhatRemains() public {
-    uint256 _id = _createAccepted(address(vault), GRANT);
-    vault.simulateLoss(250e6);
-    vm.prank(coop);
-    grants.payBack(_id, ADVANCE);
-    uint256 _before = usdt.balanceOf(coop);
-    grants.releaseGrant(_id);
-    assertApproxEqAbs(usdt.balanceOf(coop) - _before, 750e6, 2);
-    assertEq(vault.balanceOf(address(grants)), 0);
-  }
-
-  // --------------------------------------------------------------------------
   // Isolation and fuzz
   // --------------------------------------------------------------------------
 
-  function test_twoGrantsSameVault_noBleed() public {
-    uint256 _a = _createAccepted(address(vault), GRANT);
-    uint256 _b = _createAccepted(address(vault), GRANT);
-    vault.simulateYield(100e6);
-    vm.prank(coop);
-    grants.payBack(_a, ADVANCE);
-    grants.releaseGrant(_a);
-
-    assertEq(vault.balanceOf(address(grants)), _status(_b).held);
-    assertApproxEqAbs(_status(_a).grantorOwed, ADVANCE + 50e6, 2);
-    assertApproxEqAbs(grants.escrowValue(_b), GRANT + 50e6, 2);
-  }
-
-  function testFuzz_fullLifecycle_conservesFunds(
-    uint256 _advance,
-    uint256 _grant,
-    uint256 _yield,
-    uint8 _installments,
-    bool _useVault
-  ) public {
+  function testFuzz_fullLifecycle_conservesFunds(uint256 _advance, uint256 _grant, uint8 _installments) public {
     _advance = bound(_advance, 1, 10_000e6);
     _grant = bound(_grant, 0, 10_000e6);
-    _yield = bound(_yield, 0, 1000e6);
     _installments = uint8(bound(_installments, 1, 24));
-    address _v = _useVault ? address(vault) : address(0);
 
-    IConditionalGrants.GrantTerms memory _t = _terms(_v, _grant);
+    IConditionalGrants.GrantTerms memory _t = _terms(_grant);
     _t.advance = _advance;
     vm.prank(bread);
     uint256 _id = grants.create(_t, coop);
     vm.prank(coop);
     grants.accept(_id, TERMS);
-    // Yield only accrues while the grant sits in escrow; with no grant nothing stays in the vault.
-    if (!_useVault || _grant == 0) _yield = 0;
-    if (_yield > 0) vault.simulateYield(_yield);
 
     uint256 _step = _advance / _installments + 1;
     while (grants.outstanding(_id) > 0) {
@@ -877,12 +743,9 @@ contract ConditionalGrantsUnit is Test {
     if (_status(_id).grantorOwed > 0) grants.collect(_id);
 
     assertEq(usdt.balanceOf(coop), START_BAL + _grant);
-    // The grantor gets back exactly the advance plus at most the simulated yield (part of it can
-    // accrue to the vault's virtual shares when the escrow is tiny).
-    uint256 _grantorGain = usdt.balanceOf(bread) + _grant - START_BAL;
-    assertLe(_grantorGain, _yield);
+    // The grantor gets the advance back and is out exactly the grant.
+    assertEq(usdt.balanceOf(bread), START_BAL - _grant);
     assertEq(usdt.balanceOf(address(grants)), 0);
-    assertEq(vault.balanceOf(address(grants)), 0);
   }
 
   // --------------------------------------------------------------------------
@@ -890,7 +753,7 @@ contract ConditionalGrantsUnit is Test {
   // balances, states and solvency after each journey.
   // --------------------------------------------------------------------------
 
-  /// @dev Without vaults, the contract must hold exactly the escrow plus grantor credits.
+  /// @dev The contract must hold exactly the escrow plus grantor credits.
   function _assertSolvent() internal view {
     uint256 _owed;
     for (uint256 _i = 0; _i < grants.nextId(); _i++) {
@@ -901,7 +764,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_scenario_happyPathWithHelpersAndOverpayment() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     grants.payBack(_id, 300e6);
     vm.prank(helper);
@@ -926,9 +789,9 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_scenario_cancelAndExpiryRefundEverything() public {
-    uint256 _open = _create(address(0), GRANT);
+    uint256 _open = _create(GRANT);
     vm.prank(bread);
-    IConditionalGrants.GrantTerms memory _t = _terms(address(0), GRANT);
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
     uint256 _unnamed = grants.create(_t, address(0));
     _assertSolvent();
 
@@ -949,8 +812,8 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_scenario_defaultThenGranteeStillPaysBack() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
-    uint256 _other = _createAccepted(address(0), GRANT); // stays open alongside
+    uint256 _id = _createAccepted(GRANT);
+    uint256 _other = _createAccepted(GRANT); // stays open alongside
     vm.prank(coop);
     grants.payBack(_id, 400e6);
 
@@ -968,7 +831,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_scenario_extendThenComplete() public {
-    uint256 _id = _createAccepted(address(0), GRANT);
+    uint256 _id = _createAccepted(GRANT);
     vm.warp(_status(_id).payBackBy + 1 days);
     vm.prank(bread);
     grants.extendPayBackBy(_id, block.timestamp + 30 days);
@@ -983,7 +846,7 @@ contract ConditionalGrantsUnit is Test {
   }
 
   function test_scenario_zeroGrantIsAPlainAdvance() public {
-    uint256 _id = _createAccepted(address(0), 0);
+    uint256 _id = _createAccepted(0);
     vm.warp(_status(_id).payBackBy + grants.RECLAIM_GRACE_PERIOD());
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);

@@ -18,7 +18,7 @@ absorbs the grant as the cost of the program, but only once the grantee has show
 
 ## 1. The mechanism
 
-A conditional grant has immutable terms fixed at `create`: `(token, vault, advance, grant, acceptBy,
+A conditional grant has immutable terms fixed at `create`: `(token, advance, grant, acceptBy,
 payBackPeriod, termsHash)`. The caller becomes the grantor and pays `advance + grant` into escrow in
 the same transaction, so the grantee can verify on-chain that both the advance and the grant are
 real before agreeing to anything.
@@ -30,7 +30,7 @@ cancelled                       → Cancelled   (terminal)
 not accepted, now < acceptBy    → Offered
 not accepted, now >= acceptBy   → Expired     (grantor can cancel for a refund)
 grant reclaimed                 → Defaulted   (terminal for the grant)
-paidBack >= disbursed           → PaidBack    (grant waiting) or Completed (grant paid, or no grant)
+paidBack >= advance             → PaidBack    (grant waiting) or Completed (grant paid, or no grant)
 no deadline, or now < payBackBy → Active
 otherwise                       → Overdue
 ```
@@ -53,7 +53,7 @@ otherwise                       → Overdue
 - **Paying back.** `payBack` accepts any amount at any time, from the grantee or anyone paying on
   their behalf. Overpayment is capped, so only what is owed is pulled. Payments are credited to the
   grantor and paid out with `collect`, which anyone can trigger.
-- **Grant unlock.** Once cumulative payments reach the disbursed advance, `releaseGrant` pays the
+- **Grant unlock.** Once cumulative payments reach the advance, `releaseGrant` pays the
   grant to the grantee. It is permissionless, so the app or an automation can trigger it, but the
   grant can only ever go to the grantee.
 - **Late payment.** After `payBackBy` the conditional grant is Overdue. The grantee can still pay back
@@ -66,45 +66,29 @@ otherwise                       → Overdue
   `STUCK_GRANT_PERIOD` (90 days), for example because the token issuer blocklisted the grantee's
   address, the grantor may reclaim it so it isn't locked forever. `reclaimableAt(id)` returns the
   earliest reclaim time for either case.
-- **Cancellation.** Before acceptance the grantor can `cancel` and get everything back, including
-  yield.
+- **Cancellation.** Before acceptance the grantor can `cancel` and get everything back.
 
-## 2. Yield on escrow
+## 2. No yield on escrow
 
-Money waits in escrow twice: the advance between offer and acceptance, and the grant for the whole
-pay-back period. Each conditional grant can name an ERC-4626 vault from an admin allowlist, and
-escrow is deposited there instead of sitting idle. On Celo the natural choice is Aave v3, which
-supports USDT through its ERC-4626 wrapper, waCelUSDT (`0x5264B1F45616dB619Bb3c8DCeBD86fB33FA0e53F`, from
-bgd-labs' aave-address-book; `asset()` is Celo USDT). `yarn test:fork` runs the contract against it on a
-mainnet fork: a waiting grant earns Aave's supply rate for the grantor (about 0.29% a year at the pinned
-block), the grantee receives exactly the grant, and cancel and reclaim return escrow plus yield.
-
-All yield belongs to the grantor. When escrow empties (grant paid, reclaimed, or offer cancelled),
-whatever is left beyond what was owed out is credited to the grantor. Each conditional grant tracks
-its own vault shares, so two of them in the same vault never touch each other's yield.
-
-Using a generic ERC-4626 interface keeps the contract chain-agnostic. A conditional grant with
-`vault = address(0)` keeps escrow as a plain token balance.
+Escrow is held as a plain token balance and earns nothing. An earlier version could deposit escrow
+into an allowlisted ERC-4626 vault (Aave v3's wrapped USDT on Celo) so the waiting grant earned
+yield for the grantor. A mainnet-fork test showed it worked, but Aave's USDT supply rate on Celo
+was about 0.29% a year: roughly 3 USDT a year on a 1,000 USDT grant. That was not worth the added
+surface (vault rounding, liquidity limits, vault losses), so it was removed. It can come back
+through an upgrade if a better yield source appears.
 
 ## 3. Safety
 
-- **Solvency.** Without a vault, the contract's token balance equals the sum of escrow held plus
-  grantor credits. With vaults, the contract's vault shares equal the sum of per-grant shares.
+- **Solvency.** The contract's token balance equals the sum of escrow held plus grantor credits.
   Every increment is matched by a transfer in, and every decrement by a transfer out.
 - **Roles over existing funds.** The grantor can cancel only before acceptance and reclaim the grant
   only once the advance is Overdue; neither touches the grantee's advance or payments. The
-  allowlist admin can only change which tokens and vaults new conditional grants may use; existing
-  ones keep their token and vault. The contract is upgradeable, though: whoever controls the proxy
+  allowlist admin can only change which tokens new conditional grants may use; existing ones keep
+  their token. The contract is upgradeable, though: whoever controls the proxy
   admin can replace the implementation and so has custody of everything in escrow. In production
   that key belongs behind a multisig.
-- **Vault losses.** If the vault loses value, payouts are capped at what escrow can cover. The
-  grantee only owes what was actually disbursed (`disbursed`, not `advance`), so a vault loss never
-  leaves them owing money they did not receive.
-- **Vault liquidity.** If the vault cannot pay out at the moment (for example Aave at 100%
-  utilization), acceptance, grant release and cancellation revert until liquidity returns. No funds
-  are lost, but actions can be delayed. Allowlist only vaults with deep liquidity.
 - **Re-entrancy.** Every token-moving function is `nonReentrant` and updates state before
-  transfers, except where a vault's return value is needed to update shares.
+  transfers.
 - **Weird tokens.** Fee-on-transfer and rebasing tokens must never be allowlisted, matching repo
   policy. USDT on Celo uses 6 decimals, which the tests exercise.
 
@@ -114,7 +98,7 @@ Using a generic ERC-4626 interface keeps the contract chain-agnostic. A conditio
   term. The grantee's only choice is to accept as written, which keeps the offer verifiable and
   avoids a negotiation protocol on-chain. A grantee-initiated request flow can live in the app.
 - **No interest.** The product is a zero-interest advance with a reward for paying it back. The
-  grantor earns yield on escrow instead, which partly offsets the cost of the grant.
+  grant is the program's cost, paid by the grantor.
 - **Grant is all-or-nothing.** There is no partial release for partial payment. That keeps the
   incentive clear and the accounting simple.
 - **Separate contract.** The ASCA in #184 caps credit at the member's own savings, which is the
@@ -125,11 +109,10 @@ Using a generic ERC-4626 interface keeps the contract chain-agnostic. A conditio
 
 Implemented: grantor-funded offers, late-bound grantee, terms-hash acceptance, flexible paying back
 by anyone, permissionless grant release, reclaim on default, deadline extensions, open-ended grants
-with a notice period for setting a deadline, ERC-4626 escrow yield, a reclaim grace period and an
-unreleased-grant fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with
-50 unit tests, a lifecycle fuzz test and 5 end-to-end scenarios
+with a notice period for setting a deadline, a reclaim grace period and an unreleased-grant
+fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 40 unit tests, a lifecycle fuzz test and 5 end-to-end scenarios
 that check solvency after each journey.
 
 Deferred: multiple grantors funding one conditional grant, more than one step (e.g. 500 then 1,000
-then a grant), installment schedules with per-installment deadlines, yield routed to the grantee or
-a solidarity fund, and Chainlink automation for `releaseGrant` and `collect`.
+then a grant), installment schedules with per-installment deadlines, yield on escrow, and Chainlink
+automation for `releaseGrant` and `collect`.
