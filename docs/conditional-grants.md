@@ -74,8 +74,10 @@ otherwise                       → Overdue
 Money waits in escrow twice: the advance between offer and acceptance, and the grant for the whole
 pay-back period. Each conditional grant can name an ERC-4626 vault from an admin allowlist, and
 escrow is deposited there instead of sitting idle. On Celo the natural choice is Aave v3, which
-supports USDT; Aave's static aToken wrappers expose the ERC-4626 interface. The exact wrapper
-address for USDT on Celo should be confirmed before it is allowlisted.
+supports USDT through its ERC-4626 wrapper, waCelUSDT (`0x5264B1F45616dB619Bb3c8DCeBD86fB33FA0e53F`, from
+bgd-labs' aave-address-book; `asset()` is Celo USDT). `yarn test:fork` runs the contract against it on a
+mainnet fork: a waiting grant earns Aave's supply rate for the grantor (about 0.29% a year at the pinned
+block), the grantee receives exactly the grant, and cancel and reclaim return escrow plus yield.
 
 All yield belongs to the grantor. When escrow empties (grant paid, reclaimed, or offer cancelled),
 whatever is left beyond what was owed out is credited to the grantor. Each conditional grant tracks
@@ -130,5 +132,4 @@ that check solvency after each journey.
 
 Deferred: multiple grantors funding one conditional grant, more than one step (e.g. 500 then 1,000
 then a grant), installment schedules with per-installment deadlines, yield routed to the grantee or
-a solidarity fund, Chainlink automation for `releaseGrant` and `collect`, and fork tests against the
-live Aave wrapper on Celo.
+a solidarity fund, and Chainlink automation for `releaseGrant` and `collect`.

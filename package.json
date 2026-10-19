@@ -24,6 +24,7 @@
     "lint:sol": "solhint 'src/**/*.sol' 'script/**/*.sol' 'test/**/*.sol'",
     "prepare": "husky",
     "test": "forge test -vvv",
+    "test:fork": "CELO_FORK_TESTS=true forge test --match-contract Fork -vv",
     "test:frontend": "vitest run",
     "test:integration": "forge test --match-contract Integration -vvv",
     "test:symbolic": "halmos",
