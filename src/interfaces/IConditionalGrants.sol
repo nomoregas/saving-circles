@@ -9,6 +9,9 @@ pragma solidity 0.8.28;
  *         pays back in any amounts, and the grant can be released to the grantee as soon as
  *         cumulative payments reach the advance. If the grantee is late, the grantor may reclaim
  *         the grant; the advance remains owed and can still be paid back.
+ *         The grantor may also charge a fee. The grantee owes advance + fee, but only the advance
+ *         (plus any part of the fee the grant cannot cover) must be paid to unlock the grant: on
+ *         release, any unpaid fee is taken out of the grant and credited to the grantor.
  */
 interface IConditionalGrants {
   /**
@@ -21,10 +24,11 @@ interface IConditionalGrants {
    *      Overdue = 4 accepted, advance not fully paid back, at/after payBackBy. The grantee may still
    *                 pay back and claim the grant until the grantor reclaims it, which is only
    *                 allowed RECLAIM_GRACE_PERIOD after payBackBy.
-   *      PaidBack = 5 advance fully paid back; the grant is waiting to be released to the grantee. If
+   *      PaidBack = 5 advance paid back (plus any fee the grant cannot cover); the grant is waiting to
+   *                  be released to the grantee, minus any unpaid fee. If
    *                  it is still unreleased STUCK_GRANT_PERIOD after paidBackAt (e.g. the grantee
    *                  can no longer receive the token), the grantor may reclaim it.
-   *      Completed = 6 advance paid back and the grant (if any) paid to the grantee. Terminal.
+   *      Completed = 6 advance and fee settled and the grant (if any) paid to the grantee. Terminal.
    *      Defaulted = 7 the grantor reclaimed the grant (late payment, or a grant left unreleased).
    *                   Terminal for the grant; any remaining advance can still be paid back.
    */
@@ -45,6 +49,9 @@ interface IConditionalGrants {
    * @param advance The amount advanced to the grantee on acceptance (> 0).
    * @param grant The amount released to the grantee once the advance is paid back; 0 makes this a
    *        plain zero-interest advance with no grant.
+   * @param fee A fee the grantee owes on top of the advance (may be 0). The grantee can pay it in
+   *        cash to receive the full grant, or leave it to be taken out of the grant on release.
+   *        Any part of the fee larger than the grant must be paid in cash before the grant unlocks.
    * @param acceptBy Unix timestamp; the grantee must accept strictly before it.
    * @param payBackPeriod Seconds after acceptance until an unpaid advance becomes Overdue, at most
    *        MAX_PAY_BACK_PERIOD. 0 makes the grant open-ended: no deadline until the grantor sets one
@@ -56,6 +63,7 @@ interface IConditionalGrants {
     address token;
     uint256 advance;
     uint256 grant;
+    uint256 fee;
     uint256 acceptBy;
     uint256 payBackPeriod;
     bytes32 termsHash;
@@ -68,11 +76,12 @@ interface IConditionalGrants {
    * @param acceptedAt Acceptance timestamp, 0 until accepted.
    * @param payBackBy Timestamp at which an unpaid advance becomes Overdue, 0 until accepted or while
    *        an open-ended grant has no deadline. The grantor may push it later with extendPayBackBy().
-   * @param paidBack Cumulative advance paid back (never exceeds advance).
-   * @param paidBackAt When the advance was fully paid back, 0 until then.
+   * @param paidBack Cumulative amount paid toward advance + fee (never exceeds advance + fee). Fee
+   *        taken out of the grant on release counts as paid.
+   * @param paidBackAt When paidBack first reached the amount that unlocks the grant, 0 until then.
    * @param held Tokens escrowed for this conditional grant: advance + grant before acceptance, then
    *        the grant until it is released or reclaimed.
-   * @param grantorOwed Payments credited to the grantor and not yet collected.
+   * @param grantorOwed Payments and fees credited to the grantor and not yet collected.
    * @param cancelled Whether the grantor cancelled before acceptance.
    * @param grantPaid Whether the grant was released to the grantee.
    * @param grantReclaimed Whether the grantor reclaimed the grant after it went Overdue.
@@ -148,8 +157,9 @@ interface IConditionalGrants {
    * @param id The conditional grant id.
    * @param grantee The grantee.
    * @param amount Tokens paid to the grantee.
+   * @param feeFromGrant Unpaid fee taken out of the grant and credited to the grantor.
    */
-  event GrantReleased(uint256 indexed id, address indexed grantee, uint256 amount);
+  event GrantReleased(uint256 indexed id, address indexed grantee, uint256 amount, uint256 feeFromGrant);
 
   /**
    * @notice Emitted when the grantor reclaims the grant of an Overdue conditional grant.
@@ -313,16 +323,19 @@ interface IConditionalGrants {
   function accept(uint256 id, bytes32 termsHash) external;
 
   /**
-   * @notice Pay back the advance. Callable by anyone on the grantee's behalf. Payments above the
-   *         outstanding amount are capped, so only what is owed is pulled.
+   * @notice Pay toward the advance, then the fee. Callable by anyone on the grantee's behalf.
+   *         Payments above the outstanding amount are capped, so only what is owed is pulled.
    * @param id The conditional grant id.
    * @param amount The maximum amount to pay back.
    */
   function payBack(uint256 id, uint256 amount) external;
 
   /**
-   * @notice Release the grant to the grantee once the advance is fully paid back. Callable by
-   *         anyone; the grant always goes to the grantee.
+   * @notice Release the grant to the grantee once the advance is paid back. Any unpaid fee is taken
+   *         out of the grant and credited to the grantor; while that would happen, only the grantee
+   *         may release, so the choice between paying the fee in cash and taking it from the grant
+   *         stays theirs. Once the fee is paid, anyone may release. The grant always goes to the
+   *         grantee.
    * @param id The conditional grant id.
    */
   function releaseGrant(uint256 id) external;
@@ -386,7 +399,7 @@ interface IConditionalGrants {
   function grantState(uint256 id) external view returns (GrantState state);
 
   /**
-   * @notice Get the advance still owed: advance minus paid back (0 before acceptance).
+   * @notice Get the amount still owed: advance + fee minus paid back (0 before acceptance).
    * @param id The conditional grant id.
    * @return amount The outstanding advance.
    */

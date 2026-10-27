@@ -73,6 +73,7 @@ contract ConditionalGrantsUnit is Test {
       token: address(usdt),
       advance: ADVANCE,
       grant: _grant,
+      fee: 0,
       acceptBy: block.timestamp + ACCEPT_WINDOW,
       payBackPeriod: PERIOD,
       termsHash: TERMS
@@ -410,7 +411,7 @@ contract ConditionalGrantsUnit is Test {
     grants.payBack(_id, ADVANCE);
 
     vm.expectEmit(true, true, false, true);
-    emit IConditionalGrants.GrantReleased(_id, coop, GRANT);
+    emit IConditionalGrants.GrantReleased(_id, coop, GRANT, 0);
     vm.prank(stranger);
     grants.releaseGrant(_id);
 
@@ -745,6 +746,186 @@ contract ConditionalGrantsUnit is Test {
     assertEq(usdt.balanceOf(coop), START_BAL + _grant);
     // The grantor gets the advance back and is out exactly the grant.
     assertEq(usdt.balanceOf(bread), START_BAL - _grant);
+    assertEq(usdt.balanceOf(address(grants)), 0);
+  }
+
+  // --------------------------------------------------------------------------
+  // Fee: paid in cash for the full grant, or taken out of the grant on release
+  // --------------------------------------------------------------------------
+
+  uint256 public constant FEE = 150e6;
+
+  function _createWithFee(uint256 _grant, uint256 _fee) internal returns (uint256 _id) {
+    IConditionalGrants.GrantTerms memory _t = _terms(_grant);
+    _t.fee = _fee;
+    vm.prank(bread);
+    _id = grants.create(_t, coop);
+    vm.prank(coop);
+    grants.accept(_id, TERMS);
+  }
+
+  function test_fee_owedOnTopOfAdvance() public {
+    uint256 _id = _createWithFee(GRANT, FEE);
+    assertEq(grants.outstanding(_id), ADVANCE + FEE);
+    // Creating only escrows advance + grant; the fee is owed by the grantee, not funded.
+    assertEq(usdt.balanceOf(bread), START_BAL - ADVANCE - GRANT);
+  }
+
+  function test_fee_paidInCashGetsFullGrant() public {
+    uint256 _id = _createWithFee(GRANT, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.PaidBack));
+    assertEq(grants.outstanding(_id), FEE);
+
+    // The grant waits while the grantee pays the fee too; payments are still accepted.
+    vm.prank(coop);
+    grants.payBack(_id, FEE);
+    assertEq(grants.outstanding(_id), 0);
+
+    // Fee fully paid: anyone may release, and the grantee gets the whole grant.
+    vm.expectEmit(true, true, false, true);
+    emit IConditionalGrants.GrantReleased(_id, coop, GRANT, 0);
+    vm.prank(stranger);
+    grants.releaseGrant(_id);
+    assertEq(usdt.balanceOf(coop), START_BAL + GRANT - FEE);
+    assertEq(_status(_id).grantorOwed, ADVANCE + FEE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    _assertSolvent();
+  }
+
+  function test_fee_takenFromGrantOnRelease() public {
+    uint256 _id = _createWithFee(500e6, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+
+    vm.expectEmit(true, true, false, true);
+    emit IConditionalGrants.GrantReleased(_id, coop, 350e6, FEE);
+    vm.prank(coop);
+    grants.releaseGrant(_id);
+
+    assertEq(usdt.balanceOf(coop), START_BAL + 350e6, 'grantee: grant minus fee');
+    assertEq(_status(_id).grantorOwed, ADVANCE + FEE, 'grantor: advance + fee');
+    assertEq(grants.outstanding(_id), 0);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    grants.collect(_id);
+    assertEq(usdt.balanceOf(bread), START_BAL - 500e6 + FEE, 'grantor out the grant, plus the fee');
+    _assertSolvent();
+  }
+
+  function test_fee_partlyCashRestFromGrant() public {
+    uint256 _id = _createWithFee(500e6, FEE);
+    vm.startPrank(coop);
+    grants.payBack(_id, ADVANCE + 50e6);
+    grants.releaseGrant(_id);
+    vm.stopPrank();
+    assertEq(usdt.balanceOf(coop), START_BAL - 50e6 + 400e6);
+    assertEq(_status(_id).grantorOwed, ADVANCE + FEE);
+    _assertSolvent();
+  }
+
+  function test_fee_onlyGranteeChoosesToTakeItFromGrant() public {
+    uint256 _id = _createWithFee(500e6, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.NotGrantee.selector);
+    grants.releaseGrant(_id);
+    vm.prank(stranger);
+    vm.expectRevert(IConditionalGrants.NotGrantee.selector);
+    grants.releaseGrant(_id);
+  }
+
+  function test_fee_largerThanGrantMustBePaidFirst() public {
+    // Fee 150 on a 100 grant: the 50 the grant can't cover must be paid in cash to unlock it.
+    uint256 _id = _createWithFee(100e6, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Active));
+    vm.prank(coop);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.releaseGrant(_id);
+
+    vm.prank(coop);
+    grants.payBack(_id, 50e6);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.PaidBack));
+    assertEq(_status(_id).paidBackAt, block.timestamp);
+
+    // The rest of the fee (100) uses up the whole grant.
+    vm.prank(coop);
+    grants.releaseGrant(_id);
+    assertEq(usdt.balanceOf(coop), START_BAL - 50e6);
+    assertEq(_status(_id).grantorOwed, ADVANCE + FEE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    _assertSolvent();
+  }
+
+  function test_fee_shortfallCountsTowardTheDeadline() public {
+    uint256 _id = _createWithFee(100e6, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    vm.warp(_status(_id).payBackBy);
+    // Advance paid but not the 50 the grant can't cover: still late.
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Overdue));
+  }
+
+  function test_fee_noGrantCompletesOnlyWhenFeePaid() public {
+    uint256 _id = _createWithFee(0, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Active));
+    vm.prank(coop);
+    grants.payBack(_id, FEE);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    assertEq(_status(_id).grantorOwed, ADVANCE + FEE);
+  }
+
+  function test_fee_stillOwedAfterReclaim() public {
+    uint256 _id = _createWithFee(GRANT, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, 400e6);
+    vm.warp(grants.reclaimableAt(_id));
+    vm.prank(bread);
+    grants.reclaimGrant(_id);
+    assertEq(grants.outstanding(_id), ADVANCE + FEE - 400e6);
+    vm.prank(coop);
+    grants.payBack(_id, 10_000e6);
+    assertEq(grants.outstanding(_id), 0);
+    _assertSolvent();
+  }
+
+  function test_fee_unreleasedGrantFallsBackToGrantor() public {
+    // Advance paid, fee left for the grant, but the grantee never releases.
+    uint256 _id = _createWithFee(500e6, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    vm.warp(_status(_id).paidBackAt + grants.STUCK_GRANT_PERIOD());
+    vm.prank(bread);
+    grants.reclaimGrant(_id);
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
+    _assertSolvent();
+  }
+
+  function testFuzz_fee_conservesFunds(uint256 _grant, uint256 _fee, uint256 _cashFee) public {
+    _grant = bound(_grant, 0, 5000e6);
+    _fee = bound(_fee, 0, 5000e6);
+    _cashFee = bound(_cashFee, 0, _fee);
+    uint256 _id = _createWithFee(_grant, _fee);
+    uint256 _shortfall = _fee > _grant ? _fee - _grant : 0;
+    if (_cashFee < _shortfall) _cashFee = _shortfall;
+
+    vm.startPrank(coop);
+    grants.payBack(_id, ADVANCE + _cashFee);
+    if (_grant > 0) grants.releaseGrant(_id);
+    vm.stopPrank();
+
+    assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Completed));
+    assertEq(grants.outstanding(_id), 0, 'advance + fee fully settled');
+    // The grantee ends up with the grant minus the fee, however it was paid.
+    assertEq(int256(usdt.balanceOf(coop)) - int256(START_BAL), int256(_grant) - int256(_fee));
+    if (_status(_id).grantorOwed > 0) grants.collect(_id);
+    assertEq(usdt.balanceOf(bread), START_BAL - _grant + _fee, 'grantor: out the grant, plus the fee');
     assertEq(usdt.balanceOf(address(grants)), 0);
   }
 

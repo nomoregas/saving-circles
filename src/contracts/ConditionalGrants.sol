@@ -14,7 +14,8 @@ using SafeERC20 for IERC20;
  * @title ConditionalGrants
  * @notice Conditional grants: a grantor funds a zero-interest advance plus an optional grant, the
  *         named grantee accepts the exact terms and receives the advance, and the grant unlocks once
- *         the advance is paid back in full. See docs/conditional-grants.md for the design rationale.
+ *         the advance is paid back in full. An optional fee is either paid in cash or taken out of the
+ *         grant on release. See docs/conditional-grants.md for the design rationale.
  * @author Breadchain Collective
  */
 contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, OwnableUpgradeable {
@@ -200,14 +201,17 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   function payBack(uint256 _id, uint256 _amount) external override nonReentrant onlyExisting(_id) {
     if (_amount == 0) revert InvalidAmount();
     GrantStatus storage _st = _status[_id];
-    uint256 _advance = _terms[_id].advance;
-    if (_st.acceptedAt == 0 || _st.paidBack >= _advance) revert InvalidState();
+    GrantTerms storage _t = _terms[_id];
+    uint256 _total = _t.advance + _t.fee;
+    if (_st.acceptedAt == 0 || _st.paidBack >= _total) revert InvalidState();
 
-    uint256 _owed = _advance - _st.paidBack;
+    uint256 _owed = _total - _st.paidBack;
     uint256 _applied = _amount < _owed ? _amount : _owed;
+    uint256 _unlock = _unlockAmount(_id);
+    bool _wasLocked = _st.paidBack < _unlock;
     _st.paidBack += _applied;
     _st.grantorOwed += _applied;
-    if (_st.paidBack == _advance) _st.paidBackAt = block.timestamp;
+    if (_wasLocked && _st.paidBack >= _unlock) _st.paidBackAt = block.timestamp;
 
     IERC20(_terms[_id].token).safeTransferFrom(msg.sender, address(this), _applied);
 
@@ -219,10 +223,18 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_state(_id) != GrantState.PaidBack) revert InvalidState();
 
     GrantStatus storage _st = _status[_id];
+    GrantTerms storage _t = _terms[_id];
+    // Whatever fee is still unpaid comes out of the grant. Reaching PaidBack guarantees it fits.
+    uint256 _feeFromGrant = _t.advance + _t.fee - _st.paidBack;
+    if (_feeFromGrant > 0 && msg.sender != _st.grantee) revert NotGrantee();
+
     _st.grantPaid = true;
+    _st.paidBack += _feeFromGrant;
+    _st.grantorOwed += _feeFromGrant;
+    _st.held -= _feeFromGrant;
     uint256 _paid = _releaseHeld(_id, _st.grantee);
 
-    emit GrantReleased(_id, _st.grantee, _paid);
+    emit GrantReleased(_id, _st.grantee, _paid, _feeFromGrant);
   }
 
   // =======================
@@ -249,7 +261,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   /// @inheritdoc IConditionalGrants
   function outstanding(uint256 _id) external view override onlyExisting(_id) returns (uint256 _amount) {
     GrantStatus storage _st = _status[_id];
-    if (_st.acceptedAt != 0) _amount = _terms[_id].advance - _st.paidBack;
+    if (_st.acceptedAt != 0) _amount = _terms[_id].advance + _terms[_id].fee - _st.paidBack;
   }
 
   /// @inheritdoc IConditionalGrants
@@ -283,6 +295,13 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_paid > 0) IERC20(_terms[_id].token).safeTransfer(_to, _paid);
   }
 
+  /// @dev What must be paid in cash to unlock the grant: the advance, plus any part of the fee the
+  ///      grant is too small to cover. With no grant, that is the whole advance + fee.
+  function _unlockAmount(uint256 _id) internal view returns (uint256 _amount) {
+    GrantTerms storage _t = _terms[_id];
+    _amount = _t.advance + (_t.fee > _t.grant ? _t.fee - _t.grant : 0);
+  }
+
   /// @dev Earliest reclaim time: a grace period after the deadline while unpaid, or a long wait
   ///      after full pay-back if the grant was never released. 0 when there is nothing to reclaim,
   ///      including an open-ended grant with no deadline set.
@@ -291,7 +310,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_terms[_id].grant == 0 || _st.cancelled || _st.acceptedAt == 0 || _st.grantPaid || _st.grantReclaimed) {
       return 0;
     }
-    if (_st.paidBack >= _terms[_id].advance) return _st.paidBackAt + STUCK_GRANT_PERIOD;
+    if (_st.paidBack >= _unlockAmount(_id)) return _st.paidBackAt + STUCK_GRANT_PERIOD;
     // Open-ended and no deadline set yet: nothing can be reclaimed.
     if (_st.payBackBy == 0) return 0;
     _timestamp = _st.payBackBy + RECLAIM_GRACE_PERIOD;
@@ -308,7 +327,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
       return block.timestamp < _terms[_id].acceptBy ? GrantState.Offered : GrantState.Expired;
     }
     if (_st.grantReclaimed) return GrantState.Defaulted;
-    if (_st.paidBack >= _terms[_id].advance) {
+    if (_st.paidBack >= _unlockAmount(_id)) {
       return (_st.grantPaid || _terms[_id].grant == 0) ? GrantState.Completed : GrantState.PaidBack;
     }
     return (_st.payBackBy == 0 || block.timestamp < _st.payBackBy) ? GrantState.Active : GrantState.Overdue;

@@ -18,8 +18,8 @@ absorbs the grant as the cost of the program, but only once the grantee has show
 
 ## 1. The mechanism
 
-A conditional grant has immutable terms fixed at `create`: `(token, advance, grant, acceptBy,
-payBackPeriod, termsHash)`. The caller becomes the grantor and pays `advance + grant` into escrow in
+A conditional grant has immutable terms fixed at `create`: `(token, advance, grant, fee,
+acceptBy, payBackPeriod, termsHash)`. The caller becomes the grantor and pays `advance + grant` into escrow in
 the same transaction, so the grantee can verify on-chain that both the advance and the grant are
 real before agreeing to anything.
 
@@ -30,7 +30,7 @@ cancelled                       → Cancelled   (terminal)
 not accepted, now < acceptBy    → Offered
 not accepted, now >= acceptBy   → Expired     (grantor can cancel for a refund)
 grant reclaimed                 → Defaulted   (terminal for the grant)
-paidBack >= advance             → PaidBack    (grant waiting) or Completed (grant paid, or no grant)
+paidBack >= unlock amount       → PaidBack    (grant waiting) or Completed (grant paid, or no grant)
 no deadline, or now < payBackBy → Active
 otherwise                       → Overdue
 ```
@@ -53,16 +53,27 @@ otherwise                       → Overdue
 - **Paying back.** `payBack` accepts any amount at any time, from the grantee or anyone paying on
   their behalf. Overpayment is capped, so only what is owed is pulled. Payments are credited to the
   grantor and paid out with `collect`, which anyone can trigger.
-- **Grant unlock.** Once cumulative payments reach the advance, `releaseGrant` pays the
-  grant to the grantee. It is permissionless, so the app or an automation can trigger it, but the
-  grant can only ever go to the grantee.
+- **Fee.** The grantor can charge a fee (`fee`, may be 0), following Yunus-style microcredit where a
+  small charge keeps the fund going. The grantee owes `advance + fee`; payments go to the advance
+  first. The fee does not have to be paid in cash: once the advance is paid back the grantee
+  chooses to either pay the fee and receive the whole grant, or release now and have the unpaid fee
+  taken out of the grant and credited to the grantor (e.g. a 1,500 advance, 500 grant and 150 fee:
+  pay 1,650 and get 500, or pay 1,500 and get 350). Part cash, part grant works too. The grant can
+  only cover as much fee as it holds, so any part of the fee above the grant must be paid in cash
+  before the grant unlocks; that is the *unlock amount*, `advance + max(0, fee - grant)`, and it is
+  also what the deadline applies to. With no grant, the whole fee is paid in cash.
+- **Grant unlock.** Once cumulative payments reach the unlock amount, `releaseGrant` pays the
+  grant (minus any unpaid fee) to the grantee. When no fee would be deducted it is permissionless,
+  so the app or an automation can trigger it. While some fee would come out of the grant, only the
+  grantee can release, so the choice between paying the fee and taking it from the grant stays
+  theirs. Either way the grant can only ever go to the grantee.
 - **Late payment.** After `payBackBy` the conditional grant is Overdue. The grantee can still pay back
   and claim the grant until the grantor acts. The grantor can either `extendPayBackBy` to give more
   time (the new deadline must be later and in the future) or `reclaimGrant` to take the grant back.
   Reclaiming only opens `RECLAIM_GRACE_PERIOD` (7 days) after the deadline, so a grantee sending
   their final payment around the deadline can't be front-run. The advance remains owed after a
-  reclaim and can still be paid back, but the grant is gone.
-- **Unreleased grant.** If the advance is fully paid back but nobody releases the grant for
+  reclaim and can still be paid back (with the fee), but the grant is gone.
+- **Unreleased grant.** If the unlock amount is paid but nobody releases the grant for
   `STUCK_GRANT_PERIOD` (90 days), for example because the token issuer blocklisted the grantee's
   address, the grantor may reclaim it so it isn't locked forever. `reclaimableAt(id)` returns the
   earliest reclaim time for either case.
@@ -97,8 +108,10 @@ through an upgrade if a better yield source appears.
 - **Grantor initiates, grantee accepts.** Conditional grants start from the grantor, who sets every
   term. The grantee's only choice is to accept as written, which keeps the offer verifiable and
   avoids a negotiation protocol on-chain. A grantee-initiated request flow can live in the app.
-- **No interest.** The product is a zero-interest advance with a reward for paying it back. The
-  grant is the program's cost, paid by the grantor.
+- **No interest, optional flat fee.** The product is a zero-interest advance with a reward for
+  paying it back. The grant is the program's cost, paid by the grantor. A flat fee, set up front,
+  lets a fund recover some of that cost without interest that grows over time, and letting it come
+  out of the grant means paying it never stands between the grantee and finishing.
 - **Grant is all-or-nothing.** There is no partial release for partial payment. That keeps the
   incentive clear and the accounting simple.
 - **Separate contract.** The ASCA in #184 caps credit at the member's own savings, which is the
@@ -108,9 +121,10 @@ through an upgrade if a better yield source appears.
 ## 5. Scope (v1) and follow-ups
 
 Implemented: grantor-funded offers, late-bound grantee, terms-hash acceptance, flexible paying back
-by anyone, permissionless grant release, reclaim on default, deadline extensions, open-ended grants
+by anyone, an optional fee paid in cash or from the grant, grant release, reclaim on default, deadline extensions, open-ended grants
 with a notice period for setting a deadline, a reclaim grace period and an unreleased-grant
-fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 40 unit tests, a lifecycle fuzz test and 5 end-to-end scenarios
+fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 50 unit tests,
+two fuzz tests (lifecycle and fee) and 5 end-to-end scenarios
 that check solvency after each journey.
 
 Deferred: multiple grantors funding one conditional grant, more than one step (e.g. 500 then 1,000
