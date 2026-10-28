@@ -764,6 +764,44 @@ contract ConditionalGrantsUnit is Test {
     grants.accept(_id, TERMS);
   }
 
+  function test_create_revertsFeeThatWouldOverflow() public {
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
+    _t.fee = type(uint256).max - ADVANCE + 1;
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidAmount.selector);
+    grants.create(_t, coop);
+
+    // The largest fee that still fits is accepted
+    _t.fee = type(uint256).max - ADVANCE;
+    vm.prank(bread);
+    grants.create(_t, coop);
+  }
+
+  function test_deadlines_cappedAtMaxPeriodFromNow() public {
+    uint256 _max = grants.MAX_PAY_BACK_PERIOD();
+    uint256 _id = _createAccepted(GRANT);
+    vm.startPrank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
+    grants.extendPayBackBy(_id, block.timestamp + _max + 1);
+    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
+    grants.extendPayBackBy(_id, type(uint256).max);
+    grants.extendPayBackBy(_id, block.timestamp + _max);
+    vm.stopPrank();
+
+    uint256 _open;
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
+    _t.payBackPeriod = 0;
+    vm.prank(bread);
+    _open = grants.create(_t, coop);
+    vm.prank(coop);
+    grants.accept(_open, TERMS);
+    vm.startPrank(bread);
+    vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
+    grants.setPayBackBy(_open, block.timestamp + _max + 1);
+    grants.setPayBackBy(_open, block.timestamp + _max);
+    vm.stopPrank();
+  }
+
   function test_fee_owedOnTopOfAdvance() public {
     uint256 _id = _createWithFee(GRANT, FEE);
     assertEq(grants.outstanding(_id), ADVANCE + FEE);

@@ -84,7 +84,8 @@ interface IConditionalGrants {
    * @param grantorOwed Payments and fees credited to the grantor and not yet collected.
    * @param cancelled Whether the grantor cancelled before acceptance.
    * @param grantPaid Whether the grant was released to the grantee.
-   * @param grantReclaimed Whether the grantor reclaimed the grant after it went Overdue.
+   * @param grantReclaimed Whether the grantor reclaimed the grant, after a late payment or after it
+   *        was left unreleased for STUCK_GRANT_PERIOD.
    */
   struct GrantStatus {
     address grantor;
@@ -148,7 +149,7 @@ interface IConditionalGrants {
    * @param id The conditional grant id.
    * @param payer The address that paid (the grantee or anyone on their behalf).
    * @param amount Tokens applied to the advance.
-   * @param totalPaidBack Cumulative advance paid back after this payment.
+   * @param totalPaidBack Cumulative amount paid toward advance + fee after this payment.
    */
   event AdvancePaidBack(uint256 indexed id, address indexed payer, uint256 amount, uint256 totalPaidBack);
 
@@ -232,7 +233,7 @@ interface IConditionalGrants {
   /// @notice Thrown when the conditional grant is not in a state that allows the action
   error InvalidState();
 
-  /// @notice Thrown when a payment amount is zero
+  /// @notice Thrown when a payment amount is zero, or advance + fee would overflow
   error InvalidAmount();
 
   /// @notice Thrown when there is nothing to collect
@@ -293,7 +294,8 @@ interface IConditionalGrants {
    * @notice Move the pay-back deadline later, e.g. to give the grantee more time. Reverts on an
    *         open-ended grant with no deadline yet; use setPayBackBy() instead.
    * @param id The conditional grant id.
-   * @param newPayBackBy The new deadline; must be later than the current one and in the future.
+   * @param newPayBackBy The new deadline; must be later than the current one, in the future, and at
+   *        most MAX_PAY_BACK_PERIOD from now.
    */
   function extendPayBackBy(uint256 id, uint256 newPayBackBy) external;
 
@@ -301,7 +303,8 @@ interface IConditionalGrants {
    * @notice Set the first deadline on an open-ended grant (payBackPeriod 0). The grantee gets at least
    *         DEADLINE_NOTICE_PERIOD of notice; after that it behaves like any other deadline.
    * @param id The conditional grant id.
-   * @param payBackBy The deadline; at least DEADLINE_NOTICE_PERIOD from now.
+   * @param payBackBy The deadline; at least DEADLINE_NOTICE_PERIOD and at most MAX_PAY_BACK_PERIOD
+   *        from now.
    */
   function setPayBackBy(uint256 id, uint256 payBackBy) external;
 

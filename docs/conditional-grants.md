@@ -92,16 +92,30 @@ through an upgrade if a better yield source appears.
 
 - **Solvency.** The contract's token balance equals the sum of escrow held plus grantor credits.
   Every increment is matched by a transfer in, and every decrement by a transfer out.
-- **Roles over existing funds.** The grantor can cancel only before acceptance and reclaim the grant
-  only once the advance is Overdue; neither touches the grantee's advance or payments. The
-  allowlist admin can only change which tokens new conditional grants may use; existing ones keep
-  their token. The contract is upgradeable, though: whoever controls the proxy
-  admin can replace the implementation and so has custody of everything in escrow. In production
-  that key belongs behind a multisig.
+- **Roles over existing funds.** The grantor can cancel only before acceptance, and reclaim the
+  grant only 7 days after a missed deadline or 90 days after it was left unreleased; neither
+  touches the grantee's advance or payments. The allowlist admin can only change which tokens new
+  conditional grants may use; existing ones keep their token.
+- **Upgrade key.** The contract is upgradeable: whoever controls the ProxyAdmin can replace the
+  implementation, so they have custody of everything in escrow, and of any token allowance users
+  have left on the proxy. The app therefore approves only the exact amount each action pulls, so
+  no allowance is left over. The deploy script requires the admin to be a contract (a Safe) on
+  mainnet and checks both roles landed on it. Putting a `TimelockController` between the Safe and
+  the ProxyAdmin would give users time to react to a malicious upgrade.
+- **Bounds.** `advance + fee` must fit in a uint256, and no deadline can be set more than
+  `MAX_PAY_BACK_PERIOD` ahead, so a typo can't lock a grant through an overflow.
 - **Re-entrancy.** Every token-moving function is `nonReentrant` and updates state before
   transfers.
 - **Weird tokens.** Fee-on-transfer and rebasing tokens must never be allowlisted, matching repo
   policy. USDT on Celo uses 6 decimals, which the tests exercise.
+- **Token issuer powers.** Tether can blocklist addresses and pause USDT. A blocklisted grantee
+  falls back to the 90-day unreleased-grant path. A blocklisted grantor cannot receive collects,
+  refunds or reclaims until unblocked. A pause stops payments while deadlines keep running, so after
+  any pause the grantor should extend deadlines rather than reclaim.
+- **Testing.** Unit and fuzz tests, plus a handler-driven invariant suite that runs random
+  sequences of every action across several grantors and grantees and checks, after each step,
+  that the token balance exactly equals escrow plus grantor credits and that each grant's
+  bookkeeping matches its state.
 
 ## 4. Decisions worth defending
 
@@ -123,8 +137,8 @@ through an upgrade if a better yield source appears.
 Implemented: grantor-funded offers, late-bound grantee, terms-hash acceptance, flexible paying back
 by anyone, an optional fee paid in cash or from the grant, grant release, reclaim on default, deadline extensions, open-ended grants
 with a notice period for setting a deadline, a reclaim grace period and an unreleased-grant
-fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 50 unit tests,
-two fuzz tests (lifecycle and fee) and 5 end-to-end scenarios
+fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 52 unit tests,
+two fuzz tests (lifecycle and fee), an invariant suite and 5 end-to-end scenarios
 that check solvency after each journey.
 
 Deferred: multiple grantors funding one conditional grant, more than one step (e.g. 500 then 1,000

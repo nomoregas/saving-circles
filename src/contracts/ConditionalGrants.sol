@@ -85,6 +85,8 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   ) external override nonReentrant returns (uint256 _id) {
     if (!_allowedTokens[_grantTerms.token]) revert TokenNotAllowed();
     if (_grantTerms.advance == 0) revert InvalidAdvance();
+    // advance + fee must fit, or every later payment and state read would overflow and lock the grant
+    if (_grantTerms.fee > type(uint256).max - _grantTerms.advance) revert InvalidAmount();
     if (_grantTerms.acceptBy <= block.timestamp) revert InvalidAcceptBy();
     if (_grantTerms.payBackPeriod > MAX_PAY_BACK_PERIOD) revert InvalidPayBackPeriod();
     if (_grantee == msg.sender) revert InvalidGrantee();
@@ -146,7 +148,10 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_s != GrantState.Active && _s != GrantState.Overdue) revert InvalidState();
     // An open-ended grant gets its first deadline through setPayBackBy, which enforces the notice period.
     if (_status[_id].payBackBy == 0) revert InvalidState();
-    if (_newPayBackBy <= _status[_id].payBackBy || _newPayBackBy <= block.timestamp) revert InvalidPayBackPeriod();
+    if (
+      _newPayBackBy <= _status[_id].payBackBy || _newPayBackBy <= block.timestamp
+        || _newPayBackBy > block.timestamp + MAX_PAY_BACK_PERIOD
+    ) revert InvalidPayBackPeriod();
 
     _status[_id].payBackBy = _newPayBackBy;
 
@@ -156,7 +161,9 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   /// @inheritdoc IConditionalGrants
   function setPayBackBy(uint256 _id, uint256 _payBackBy) external override onlyGrantor(_id) {
     if (_state(_id) != GrantState.Active || _status[_id].payBackBy != 0) revert InvalidState();
-    if (_payBackBy < block.timestamp + DEADLINE_NOTICE_PERIOD) revert InvalidPayBackPeriod();
+    if (_payBackBy < block.timestamp + DEADLINE_NOTICE_PERIOD || _payBackBy > block.timestamp + MAX_PAY_BACK_PERIOD) {
+      revert InvalidPayBackPeriod();
+    }
 
     _status[_id].payBackBy = _payBackBy;
 
