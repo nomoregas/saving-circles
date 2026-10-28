@@ -8,7 +8,7 @@ pragma solidity 0.8.28;
  *         The grantor funds everything at create(), the grantee accepts the exact terms on-chain and
  *         pays back in any amounts, and the grant can be released to the grantee as soon as
  *         cumulative payments reach the advance. If the grantee is late, the grantor may reclaim
- *         the grant; the advance remains owed and can still be paid back.
+ *         the grant, which closes it: the rest of the advance is written off.
  *         The grantor may also charge a fee. The grantee owes advance + fee, but only the advance
  *         (plus any part of the fee the grant cannot cover) must be paid to unlock the grant: on
  *         release, any unpaid fee is taken out of the grant and credited to the grantor.
@@ -30,7 +30,8 @@ interface IConditionalGrants {
    *                  can no longer receive the token), the grantor may reclaim it.
    *      Completed = 6 advance and fee settled and the grant (if any) paid to the grantee. Terminal.
    *      Defaulted = 7 the grantor reclaimed the grant (late payment, or a grant left unreleased).
-   *                   Terminal for the grant; any remaining advance can still be paid back.
+   *                   Terminal: no more payments are accepted and the rest of the advance and fee
+   *                   is written off.
    */
   enum GrantState {
     Offered,
@@ -283,9 +284,10 @@ interface IConditionalGrants {
   function cancel(uint256 id) external;
 
   /**
-   * @notice Reclaim the grant, either RECLAIM_GRACE_PERIOD after an unpaid advance's deadline (the
-   *         advance stays owed) or STUCK_GRANT_PERIOD after it was paid back if the grant was never
-   *         released. See reclaimableAt().
+   * @notice Reclaim the grant, either RECLAIM_GRACE_PERIOD after an unpaid advance's deadline or
+   *         STUCK_GRANT_PERIOD after it was paid back if the grant was never released. This closes the
+   *         grant: no more payments are accepted and the rest of the advance and fee is written off.
+   *         Payments already made stay credited to the grantor. See reclaimableAt().
    * @param id The conditional grant id.
    */
   function reclaimGrant(uint256 id) external;
@@ -402,7 +404,8 @@ interface IConditionalGrants {
   function grantState(uint256 id) external view returns (GrantState state);
 
   /**
-   * @notice Get the amount still owed: advance + fee minus paid back (0 before acceptance).
+   * @notice Get the amount still owed: advance + fee minus paid back (0 before acceptance, and 0
+   *         once the grant is reclaimed, which writes the rest off).
    * @param id The conditional grant id.
    * @return amount The outstanding advance.
    */

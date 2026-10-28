@@ -77,7 +77,9 @@ contract ConditionalGrantsInvariantsTest is StdInvariant, Test {
       uint256 _total = _t.advance + _t.fee;
 
       assertLe(_st.paidBack, _total, 'paid more than advance + fee');
-      assertEq(grants.outstanding(_i), _st.acceptedAt == 0 ? 0 : _total - _st.paidBack, 'outstanding');
+      assertEq(
+        grants.outstanding(_i), _st.acceptedAt == 0 || _st.grantReclaimed ? 0 : _total - _st.paidBack, 'outstanding'
+      );
 
       if (_s == IConditionalGrants.GrantState.Offered || _s == IConditionalGrants.GrantState.Expired) {
         assertEq(_st.held, _t.advance + _t.grant, 'unaccepted escrow');

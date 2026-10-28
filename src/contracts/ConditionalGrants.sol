@@ -210,7 +210,8 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     GrantStatus storage _st = _status[_id];
     GrantTerms storage _t = _terms[_id];
     uint256 _total = _t.advance + _t.fee;
-    if (_st.acceptedAt == 0 || _st.paidBack >= _total) revert InvalidState();
+    // A reclaim closes the grant: the rest of the advance and fee is written off
+    if (_st.acceptedAt == 0 || _st.grantReclaimed || _st.paidBack >= _total) revert InvalidState();
 
     uint256 _owed = _total - _st.paidBack;
     uint256 _applied = _amount < _owed ? _amount : _owed;
@@ -268,7 +269,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   /// @inheritdoc IConditionalGrants
   function outstanding(uint256 _id) external view override onlyExisting(_id) returns (uint256 _amount) {
     GrantStatus storage _st = _status[_id];
-    if (_st.acceptedAt != 0) _amount = _terms[_id].advance + _terms[_id].fee - _st.paidBack;
+    if (_st.acceptedAt != 0 && !_st.grantReclaimed) _amount = _terms[_id].advance + _terms[_id].fee - _st.paidBack;
   }
 
   /// @inheritdoc IConditionalGrants

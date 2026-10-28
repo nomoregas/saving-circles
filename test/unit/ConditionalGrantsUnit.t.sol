@@ -456,14 +456,17 @@ contract ConditionalGrantsUnit is Test {
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
     assertEq(usdt.balanceOf(bread), START_BAL - ADVANCE);
 
-    // The advance is still owed and can be paid back after default, but the grant is gone.
-    vm.prank(coop);
-    grants.payBack(_id, 600e6);
+    // A reclaim closes the grant: the rest of the advance is written off and no more is accepted.
     assertEq(grants.outstanding(_id), 0);
+    vm.prank(coop);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.payBack(_id, 600e6);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.releaseGrant(_id);
+    // The 400 paid before the reclaim is still the grantor's to collect
     grants.collect(_id);
+    assertEq(usdt.balanceOf(bread), START_BAL - ADVANCE + 400e6);
   }
 
   function test_reclaimGrant_reverts() public {
@@ -919,18 +922,33 @@ contract ConditionalGrantsUnit is Test {
     assertEq(_status(_id).grantorOwed, ADVANCE + FEE);
   }
 
-  function test_fee_stillOwedAfterReclaim() public {
+  function test_fee_writtenOffAfterReclaim() public {
     uint256 _id = _createWithFee(GRANT, FEE);
     vm.prank(coop);
     grants.payBack(_id, 400e6);
     vm.warp(grants.reclaimableAt(_id));
     vm.prank(bread);
     grants.reclaimGrant(_id);
-    assertEq(grants.outstanding(_id), ADVANCE + FEE - 400e6);
-    vm.prank(coop);
-    grants.payBack(_id, 10_000e6);
     assertEq(grants.outstanding(_id), 0);
+    vm.prank(coop);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.payBack(_id, 1);
     _assertSolvent();
+  }
+
+  function test_fee_notChargedTwiceAfterUnreleasedReclaim() public {
+    // Advance paid, fee left for the grant, grant never released: the grantor reclaims the whole
+    // grant, so the grantee must not still owe the fee on top.
+    uint256 _id = _createWithFee(500e6, FEE);
+    vm.prank(coop);
+    grants.payBack(_id, ADVANCE);
+    vm.warp(_status(_id).paidBackAt + grants.STUCK_GRANT_PERIOD());
+    vm.prank(bread);
+    grants.reclaimGrant(_id);
+    assertEq(grants.outstanding(_id), 0);
+    vm.prank(coop);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
+    grants.payBack(_id, FEE);
   }
 
   function test_fee_unreleasedGrantFallsBackToGrantor() public {
@@ -1030,7 +1048,7 @@ contract ConditionalGrantsUnit is Test {
     _assertSolvent();
   }
 
-  function test_scenario_defaultThenGranteeStillPaysBack() public {
+  function test_scenario_defaultClosesTheGrant() public {
     uint256 _id = _createAccepted(GRANT);
     uint256 _other = _createAccepted(GRANT); // stays open alongside
     vm.prank(coop);
@@ -1042,6 +1060,7 @@ contract ConditionalGrantsUnit is Test {
     _assertSolvent();
 
     vm.prank(coop);
+    vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.payBack(_id, 600e6);
     assertEq(uint256(grants.grantState(_id)), uint256(IConditionalGrants.GrantState.Defaulted));
     grants.collect(_id);

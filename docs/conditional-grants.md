@@ -71,8 +71,10 @@ otherwise                       → Overdue
   and claim the grant until the grantor acts. The grantor can either `extendPayBackBy` to give more
   time (the new deadline must be later and in the future) or `reclaimGrant` to take the grant back.
   Reclaiming only opens `RECLAIM_GRACE_PERIOD` (7 days) after the deadline, so a grantee sending
-  their final payment around the deadline can't be front-run. The advance remains owed after a
-  reclaim and can still be paid back (with the fee), but the grant is gone.
+  their final payment around the deadline can't be front-run. A reclaim closes the grant: once
+  the grant is gone the grantee has no reason to keep paying, so the contract stops accepting
+  payments and writes off the rest of the advance and fee. Payments already made stay with the
+  grantor. This also means a grantee is never charged the fee for a grant the grantor took back.
 - **Unreleased grant.** If the unlock amount is paid but nobody releases the grant for
   `STUCK_GRANT_PERIOD` (90 days), for example because the token issuer blocklisted the grantee's
   address, the grantor may reclaim it so it isn't locked forever. `reclaimableAt(id)` returns the
