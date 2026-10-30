@@ -63,7 +63,7 @@ contract ConditionalGrantsHandler is CommonBase, StdCheats, StdUtils {
       acceptBy: block.timestamp + 7 days,
       // 0 makes it open-ended
       payBackPeriod: _period % 4 == 0 ? 0 : bound(_period, 1 days, 365 days),
-      termsHash: bytes32(0)
+      agreement: ''
     });
     vm.prank(_grantor);
     grants.create(_t, _grantee);
@@ -85,7 +85,7 @@ contract ConditionalGrantsHandler is CommonBase, StdCheats, StdUtils {
     if (!_ok) return;
     (IConditionalGrants.GrantTerms memory _t, IConditionalGrants.GrantStatus memory _st) = grants.getGrant(_id);
     vm.prank(_st.grantee);
-    grants.accept(_id, bytes32(0));
+    grants.accept(_id);
     ghostOut += _t.advance;
     calls['accept']++;
   }

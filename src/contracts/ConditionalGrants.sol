@@ -32,6 +32,9 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   uint256 public constant override DEADLINE_NOTICE_PERIOD = 30 days;
 
   /// @inheritdoc IConditionalGrants
+  uint256 public constant override MAX_AGREEMENT_LENGTH = 2000;
+
+  /// @inheritdoc IConditionalGrants
   uint256 public nextId;
 
   mapping(address token => bool status) internal _allowedTokens;
@@ -89,6 +92,7 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
     if (_grantTerms.fee > type(uint256).max - _grantTerms.advance) revert InvalidAmount();
     if (_grantTerms.acceptBy <= block.timestamp) revert InvalidAcceptBy();
     if (_grantTerms.payBackPeriod > MAX_PAY_BACK_PERIOD) revert InvalidPayBackPeriod();
+    if (bytes(_grantTerms.agreement).length > MAX_AGREEMENT_LENGTH) revert AgreementTooLong();
     if (_grantee == msg.sender) revert InvalidGrantee();
 
     _id = nextId++;
@@ -187,12 +191,11 @@ contract ConditionalGrants is IConditionalGrants, ReentrancyGuardUpgradeable, Ow
   // =======================
 
   /// @inheritdoc IConditionalGrants
-  function accept(uint256 _id, bytes32 _termsHash) external override nonReentrant onlyExisting(_id) {
+  function accept(uint256 _id) external override nonReentrant onlyExisting(_id) {
     GrantStatus storage _st = _status[_id];
     GrantTerms storage _t = _terms[_id];
     if (msg.sender != _st.grantee) revert NotGrantee();
     if (_state(_id) != GrantState.Offered) revert InvalidState();
-    if (_termsHash != _t.termsHash) revert TermsMismatch();
 
     _st.acceptedAt = block.timestamp;
     // A zero pay-back period means no deadline until the grantor sets one with setPayBackBy.

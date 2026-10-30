@@ -57,8 +57,9 @@ interface IConditionalGrants {
    * @param payBackPeriod Seconds after acceptance until an unpaid advance becomes Overdue, at most
    *        MAX_PAY_BACK_PERIOD. 0 makes the grant open-ended: no deadline until the grantor sets one
    *        with setPayBackBy(), at least DEADLINE_NOTICE_PERIOD in the future.
-   * @param termsHash Hash of the off-chain agreement (e.g. an IPFS document) the grantee signs
-   *        up to by passing the same hash to accept(). May be zero if no document is used.
+   * @param agreement Plain-language agreement stored with the grant, so anyone viewing it sees the
+   *        same text. Accepting the grant accepts this text. Empty for no agreement; at most
+   *        MAX_AGREEMENT_LENGTH bytes.
    */
   struct GrantTerms {
     address token;
@@ -67,7 +68,7 @@ interface IConditionalGrants {
     uint256 fee;
     uint256 acceptBy;
     uint256 payBackPeriod;
-    bytes32 termsHash;
+    string agreement;
   }
 
   /**
@@ -228,8 +229,8 @@ interface IConditionalGrants {
   /// @notice Thrown when the caller is not the grantee
   error NotGrantee();
 
-  /// @notice Thrown when the passed terms hash does not match the conditional grant
-  error TermsMismatch();
+  /// @notice Thrown when the agreement is longer than MAX_AGREEMENT_LENGTH bytes
+  error AgreementTooLong();
 
   /// @notice Thrown when the conditional grant is not in a state that allows the action
   error InvalidState();
@@ -321,11 +322,10 @@ interface IConditionalGrants {
   // =======================
 
   /**
-   * @notice Accept the terms and receive the advance.
+   * @notice Accept the terms, including the stored agreement, and receive the advance.
    * @param id The conditional grant id.
-   * @param termsHash Must equal the conditional grant's termsHash, proving which agreement was accepted.
    */
-  function accept(uint256 id, bytes32 termsHash) external;
+  function accept(uint256 id) external;
 
   /**
    * @notice Pay toward the advance, then the fee. Callable by anyone on the grantee's behalf.
@@ -373,6 +373,12 @@ interface IConditionalGrants {
    * @return period The period in seconds.
    */
   function DEADLINE_NOTICE_PERIOD() external view returns (uint256 period);
+
+  /**
+   * @notice The longest allowed agreement, in bytes.
+   * @return length The length in bytes.
+   */
+  function MAX_AGREEMENT_LENGTH() external view returns (uint256 length);
 
   /**
    * @notice When the grantor may reclaim the grant, or 0 if it cannot be reclaimed (no grant, not

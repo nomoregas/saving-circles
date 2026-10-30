@@ -19,7 +19,7 @@ absorbs the grant as the cost of the program, but only once the grantee has show
 ## 1. The mechanism
 
 A conditional grant has immutable terms fixed at `create`: `(token, advance, grant, fee,
-acceptBy, payBackPeriod, termsHash)`. The caller becomes the grantor and pays `advance + grant` into escrow in
+acceptBy, payBackPeriod, agreement)`. The caller becomes the grantor and pays `advance + grant` into escrow in
 the same transaction, so the grantee can verify on-chain that both the advance and the grant are
 real before agreeing to anything.
 
@@ -38,9 +38,10 @@ otherwise                       → Overdue
 - **Grantee.** Named at `create`, or left empty and set once with `setGrantee`. This matches the
   app flow where someone asks to join off-chain and the grantor adds them. Only the grantee can
   accept.
-- **Acceptance.** `accept(id, termsHash)` must pass the hash of the off-chain agreement (for example
-  an IPFS document with the conditions in plain language). This records on-chain exactly which
-  terms the grantee agreed to. The advance is paid out immediately and the clock starts:
+- **Acceptance.** The grantor can attach a plain-language agreement (up to 2000 bytes, or a link
+  to a longer document). It is stored with the grant, so anyone viewing the grant sees the same
+  text and it can't be changed after the offer. `accept(id)` accepts the terms including that
+  agreement; the grantee doesn't need to resubmit it. The advance is paid out immediately and the clock starts:
   `payBackBy = acceptedAt + payBackPeriod`. The pay-back period is capped at 10 years
   (`MAX_PAY_BACK_PERIOD`) so a typo can't create an offer that is impossible to accept.
 - **No deadline.** A pay-back period of 0 makes the grant open-ended: it stays Active however long
@@ -136,7 +137,7 @@ through an upgrade if a better yield source appears.
 
 ## 5. Scope (v1) and follow-ups
 
-Implemented: grantor-funded offers, late-bound grantee, terms-hash acceptance, flexible paying back
+Implemented: grantor-funded offers, late-bound grantee, an agreement stored with the grant, flexible paying back
 by anyone, an optional fee paid in cash or from the grant, grant release, reclaim on default, deadline extensions, open-ended grants
 with a notice period for setting a deadline, a reclaim grace period and an unreleased-grant
 fallback, and the view surface, behind an OZ v5 `TransparentUpgradeableProxy`, with 52 unit tests,

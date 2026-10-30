@@ -33,7 +33,7 @@ contract ConditionalGrantsUnit is Test {
   uint256 public constant ACCEPT_WINDOW = 14 days;
   uint256 public constant PERIOD = 300 days;
   uint256 public constant START_BAL = 100_000e6;
-  bytes32 public constant TERMS = keccak256('ipfs://grant-agreement');
+  string public constant AGREEMENT = 'Pay back the advance within 300 days to receive the grant.';
 
   address public owner = makeAddr('owner');
   address public bread = makeAddr('bread');
@@ -76,7 +76,7 @@ contract ConditionalGrantsUnit is Test {
       fee: 0,
       acceptBy: block.timestamp + ACCEPT_WINDOW,
       payBackPeriod: PERIOD,
-      termsHash: TERMS
+      agreement: AGREEMENT
     });
   }
 
@@ -88,7 +88,7 @@ contract ConditionalGrantsUnit is Test {
   function _createAccepted(uint256 _grant) internal returns (uint256 _id) {
     _id = _create(_grant);
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   function _status(uint256 _id) internal view returns (IConditionalGrants.GrantStatus memory _st) {
@@ -182,6 +182,24 @@ contract ConditionalGrantsUnit is Test {
     grants.create(_t, coop);
   }
 
+  function test_create_storesAgreement() public {
+    uint256 _id = _create(GRANT);
+    (IConditionalGrants.GrantTerms memory _t,) = grants.getGrant(_id);
+    assertEq(_t.agreement, AGREEMENT);
+  }
+
+  function test_create_revertsAgreementTooLong() public {
+    IConditionalGrants.GrantTerms memory _t = _terms(GRANT);
+    _t.agreement = string(new bytes(grants.MAX_AGREEMENT_LENGTH() + 1));
+    vm.prank(bread);
+    vm.expectRevert(IConditionalGrants.AgreementTooLong.selector);
+    grants.create(_t, coop);
+
+    _t.agreement = string(new bytes(grants.MAX_AGREEMENT_LENGTH()));
+    vm.prank(bread);
+    grants.create(_t, coop);
+  }
+
   function test_create_revertsSelfGrantee() public {
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidGrantee.selector);
@@ -205,7 +223,7 @@ contract ConditionalGrantsUnit is Test {
     assertEq(_status(_id).grantee, coop);
     assertEq(grants.getGranteeGrants(coop)[0], _id);
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   function test_setGrantee_reverts() public {
@@ -270,7 +288,7 @@ contract ConditionalGrantsUnit is Test {
     grants.cancel(_id);
 
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
     grants.cancel(_id);
@@ -285,7 +303,7 @@ contract ConditionalGrantsUnit is Test {
     vm.expectEmit(true, true, false, true);
     emit IConditionalGrants.GrantAccepted(_id, coop, ADVANCE, block.timestamp + PERIOD);
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
 
     assertEq(usdt.balanceOf(coop), START_BAL + ADVANCE);
     assertEq(_status(_id).held, GRANT);
@@ -301,26 +319,22 @@ contract ConditionalGrantsUnit is Test {
 
     vm.prank(stranger);
     vm.expectRevert(IConditionalGrants.NotGrantee.selector);
-    grants.accept(_id, TERMS);
-
-    vm.prank(coop);
-    vm.expectRevert(IConditionalGrants.TermsMismatch.selector);
-    grants.accept(_id, bytes32(0));
+    grants.accept(_id);
 
     vm.expectRevert(IConditionalGrants.GrantNotFound.selector);
-    grants.accept(99, TERMS);
+    grants.accept(99);
 
     vm.warp(block.timestamp + ACCEPT_WINDOW);
     vm.prank(coop);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   function test_accept_revertsTwice() public {
     uint256 _id = _createAccepted(GRANT);
     vm.prank(coop);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   function test_accept_revertsWhenCancelled() public {
@@ -329,7 +343,7 @@ contract ConditionalGrantsUnit is Test {
     grants.cancel(_id);
     vm.prank(coop);
     vm.expectRevert(IConditionalGrants.InvalidState.selector);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   // --------------------------------------------------------------------------
@@ -376,7 +390,7 @@ contract ConditionalGrantsUnit is Test {
     grants.payBack(_id, 1);
 
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
     vm.prank(coop);
     vm.expectRevert(IConditionalGrants.InvalidAmount.selector);
     grants.payBack(_id, 0);
@@ -511,7 +525,7 @@ contract ConditionalGrantsUnit is Test {
     grants.extendPayBackBy(_id, block.timestamp + 1000 days);
 
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
     uint256 _payBackBy = _status(_id).payBackBy;
     vm.prank(bread);
     vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
@@ -532,7 +546,7 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(bread);
     _id = grants.create(_t, coop);
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   function test_openEnded_neverOverdueAndNotReclaimable() public {
@@ -609,7 +623,7 @@ contract ConditionalGrantsUnit is Test {
     grants.setPayBackBy(_offered, block.timestamp + 365 days);
 
     vm.prank(coop);
-    grants.accept(_offered, TERMS);
+    grants.accept(_offered);
     vm.prank(coop);
     grants.payBack(_offered, ADVANCE);
     vm.prank(bread);
@@ -673,7 +687,7 @@ contract ConditionalGrantsUnit is Test {
     uint256 _id = _create(GRANT);
     assertEq(grants.reclaimableAt(_id), 0); // not accepted yet
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
     uint256 _payBackBy = _status(_id).payBackBy;
     assertEq(grants.reclaimableAt(_id), _payBackBy + grants.RECLAIM_GRACE_PERIOD());
 
@@ -735,7 +749,7 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(bread);
     uint256 _id = grants.create(_t, coop);
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
 
     uint256 _step = _advance / _installments + 1;
     while (grants.outstanding(_id) > 0) {
@@ -764,7 +778,7 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(bread);
     _id = grants.create(_t, coop);
     vm.prank(coop);
-    grants.accept(_id, TERMS);
+    grants.accept(_id);
   }
 
   function test_create_revertsFeeThatWouldOverflow() public {
@@ -797,7 +811,7 @@ contract ConditionalGrantsUnit is Test {
     vm.prank(bread);
     _open = grants.create(_t, coop);
     vm.prank(coop);
-    grants.accept(_open, TERMS);
+    grants.accept(_open);
     vm.startPrank(bread);
     vm.expectRevert(IConditionalGrants.InvalidPayBackPeriod.selector);
     grants.setPayBackBy(_open, block.timestamp + _max + 1);
